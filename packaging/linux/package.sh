@@ -33,6 +33,9 @@ stage_tree() {
   mkdir -p "$dest$INSTALL_DIR" "$dest/usr/bin" "$dest/usr/share/applications" \
     "$dest/usr/share/icons/hicolor/256x256/apps" "$dest/usr/share/metainfo"
   cp -a "$APP_IMAGE/." "$dest$INSTALL_DIR/"
+  # Compose copies app resources without the executable bit; yt-dlp and Deno
+  # (stream fallback and signature decoding) must be runnable from /opt.
+  chmod 755 "$dest$INSTALL_DIR"/lib/app/resources/yt-dlp "$dest$INSTALL_DIR"/lib/app/resources/deno 2>/dev/null || true
   install -m 755 "$HERE/record-labs.sh" "$dest/usr/bin/$NAME"
   install -m 644 "$HERE/record-labs.desktop" "$dest/usr/share/applications/$NAME.desktop"
   install -m 644 "$ROOT/src/main/resources/recordlabs.png" "$dest/usr/share/icons/hicolor/256x256/apps/$NAME.png"

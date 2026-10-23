@@ -59,8 +59,8 @@ jobs:
           LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
         run: packaging/linux/build-all.sh "${{ steps.version.outputs.version }}"
 
-      - name: Unit tests (audio through libVLC, Linux updater)
-        run: ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest"
+      - name: Unit tests (audio through libVLC, Linux updater, Deno daemon)
+        run: ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest" --tests "com.recordlabs.desktop.data.LinuxDenoCipherDaemonTest"
 
       - uses: actions/upload-artifact@v4
         with:
