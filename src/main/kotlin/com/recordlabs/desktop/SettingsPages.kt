@@ -763,8 +763,8 @@ private fun PlayerSettings() {
             listOf("high" to "High", "low" to "Low (saves data)"),
             quality,
         ) { quality = it }
-        SettingToggle("Normalize volume", "Coming soon on Windows", false, enabled = false) {}
-        SettingToggle("Crossfade", "Coming soon on Windows", false, enabled = false) {}
+        SettingToggle("Normalize volume", if (com.recordlabs.desktop.data.Platform.isWindows) "Coming soon on Windows" else "Coming soon on Linux", false, enabled = false) {}
+        SettingToggle("Crossfade", if (com.recordlabs.desktop.data.Platform.isWindows) "Coming soon on Windows" else "Coming soon on Linux", false, enabled = false) {}
     }
     SettingsGroup("Queue") {
         SettingToggle("Autoplay", "Play the next song when one ends", autoplay) { autoplay = it }
@@ -1113,7 +1113,7 @@ private fun UpdateCard(
 private fun AboutSettings() {
     var showLicenses by remember { mutableStateOf(false) }
     SettingsGroup("About Record Labs") {
-        SettingRow("Version", "Record Labs for Windows", icon = null, value = AppInfo.version) {}
+        SettingRow("Version", if (com.recordlabs.desktop.data.Platform.isWindows) "Record Labs for Windows" else "Record Labs for Linux", icon = null, value = AppInfo.version) {}
         SettingRow("Made by", "Byonkiee", icon = null) {}
         SettingRow("Open source licenses", "Libraries Record Labs is built with") { showLicenses = true }
     }

@@ -59,7 +59,7 @@ Priority: optional
 Architecture: amd64
 Maintainer: Record Labs <hasbenyek@users.noreply.github.com>
 Installed-Size: $(installed_kb "$root")
-Depends: libc6 (>= 2.35), libasound2t64 | libasound2, libpulse0, libx11-6, libx11-xcb1, libxext6, libxi6, libxrender1, libxtst6, libxcb1, libxcb-render0, libxcb-shm0, libgl1, libfontconfig1, libfreetype6, libharfbuzz0b, libfribidi0, libglib2.0-0t64 | libglib2.0-0, libdbus-1-3, libdrm2, zlib1g, xdg-utils
+Depends: libc6 (>= 2.35), libasound2t64 | libasound2, libpulse0, libx11-6, libx11-xcb1, libxext6, libxi6, libxrender1, libxtst6, libxcb1, libxcb-render0, libxcb-shm0, libgl1, libfontconfig1, libfreetype6, libharfbuzz0b, libfribidi0, libglib2.0-0t64 | libglib2.0-0, libdbus-1-3, libdrm2, zlib1g, xdg-utils, fonts-dejavu-core | fonts-liberation | fonts-noto-core
 Recommends: pipewire-pulse | pulseaudio
 Homepage: https://github.com/hasbenyek/record-labs-windows
 Description: Record Labs desktop music player
@@ -75,7 +75,7 @@ exit 0
 EOF
   cp "$root/DEBIAN/postinst" "$root/DEBIAN/postrm"
   chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/postrm"
-  dpkg-deb --root-owner-group -Zxz -z9 --build "$root" "$OUT/${NAME}_${VERSION}_amd64.deb"
+  dpkg-deb --root-owner-group -Zxz -z6 --build "$root" "$OUT/${NAME}_${VERSION}_amd64.deb"
 }
 
 # ---- .rpm ---------------------------------------------------------------------
@@ -84,8 +84,8 @@ build_rpm() {
   mkdir -p "$top"/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
   local tree="$WORK/rpm-tree"
   stage_tree "$tree" rpm
-  # Requirements by library name (soname) work on both Fedora and openSUSE,
-  # whose package names differ.
+  # Requirements by library name (soname) and font(...) work on both Fedora
+  # and openSUSE, whose package names differ. The UI needs at least one font.
   cat > "$top/SPECS/$NAME.spec" <<EOF
 Name:           $NAME
 Version:        $VERSION
@@ -94,11 +94,11 @@ Summary:        Record Labs desktop music player
 License:        Proprietary
 URL:            https://github.com/hasbenyek/record-labs-windows
 AutoReqProv:    no
-Requires:       libasound.so.2()(64bit), libpulse.so.0()(64bit), libX11.so.6()(64bit), libX11-xcb.so.1()(64bit), libXext.so.6()(64bit), libXi.so.6()(64bit), libXrender.so.1()(64bit), libXtst.so.6()(64bit), libxcb.so.1()(64bit), libGL.so.1()(64bit), libfontconfig.so.1()(64bit), libfreetype.so.6()(64bit), libharfbuzz.so.0()(64bit), libfribidi.so.0()(64bit), libglib-2.0.so.0()(64bit), libdbus-1.so.3()(64bit), libdrm.so.2()(64bit), libz.so.1()(64bit), xdg-utils
+Requires:       libasound.so.2()(64bit), libpulse.so.0()(64bit), libX11.so.6()(64bit), libX11-xcb.so.1()(64bit), libXext.so.6()(64bit), libXi.so.6()(64bit), libXrender.so.1()(64bit), libXtst.so.6()(64bit), libxcb.so.1()(64bit), libGL.so.1()(64bit), libfontconfig.so.1()(64bit), libfreetype.so.6()(64bit), libharfbuzz.so.0()(64bit), libfribidi.so.0()(64bit), libglib-2.0.so.0()(64bit), libdbus-1.so.3()(64bit), libdrm.so.2()(64bit), libz.so.1()(64bit), xdg-utils, font(dejavusans)
 %global __os_install_post %{nil}
 %global debug_package %{nil}
 %global _build_id_links none
-%define _binary_payload w9.xzdio
+%define _binary_payload w6.xzdio
 
 %description
 Music player for YouTube Music with synced lyrics, music videos,
@@ -130,7 +130,7 @@ build_tarball() {
   local tree="$WORK/tar-tree"
   stage_tree "$tree" tar
   local tarball="$NAME-$VERSION-linux-x86_64.tar.xz"
-  tar -C "$tree" --owner=0 --group=0 -cf - . | xz -T0 -9 > "$OUT/$tarball"
+  tar -C "$tree" --owner=0 --group=0 -cf - . | xz -T2 -6 > "$OUT/$tarball"
   local sum
   sum=$(sha256sum "$OUT/$tarball" | cut -d' ' -f1)
   sed "s/@VERSION@/$VERSION/; s/@SHA256@/$sum/" "$HERE/PKGBUILD.in" > "$OUT/PKGBUILD"
@@ -162,6 +162,6 @@ build_rpm
 build_tarball
 build_appimage
 
-(cd "$OUT" && sha256sum ./* > SHA256SUMS)
+(cd "$OUT" && sha256sum ./* > SHA256SUMS-linux)
 echo
 ls -la "$OUT"
