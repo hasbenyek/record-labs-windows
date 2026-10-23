@@ -120,7 +120,7 @@ internal class VlcPlayerBackend {
                     currentUrl = url
                     update(position = startMs, duration = 0, playing = true, ready = false, error = null, ended = false)
                     val options = if (startMs > 0) arrayOf(":start-time=${startMs / 1000.0}") else emptyArray()
-                    if (!player.media().play(url, *options)) throw IllegalStateException("VLC tidak bisa membuka sumber audio")
+                    if (!player.media().play(playableMrl(url), *options)) throw IllegalStateException("VLC tidak bisa membuka sumber audio")
                     applyVolume(player)
                     applyTempo(player)
                     ok()
@@ -264,7 +264,7 @@ internal class VlcPlayerBackend {
         val rebuilt = player ?: return
         if (url != null) {
             val options = if (resumeAt > 0) arrayOf(":start-time=${resumeAt / 1000.0}") else emptyArray()
-            rebuilt.media().play(url, *options)
+            rebuilt.media().play(playableMrl(url), *options)
             if (!keepPlaying) rebuilt.controls().setPause(true)
         }
         applyVolume(rebuilt)
@@ -291,4 +291,20 @@ internal class VlcPlayerBackend {
     }
 
     private fun ok(): String = """{"ok":true}"""
+
+    /**
+     * Java's File.toURI() gives "file:/home/me/a.mp3" (one slash) and may keep
+     * non-ASCII letters unescaped; the Windows helper accepts that, libVLC
+     * doesn't. Local files become "file:///..." with every special character
+     * percent-encoded, which VLC always decodes as UTF-8 (independent of the
+     * system locale). http(s) URLs pass through unchanged.
+     */
+    private fun playableMrl(url: String): String {
+        if (!url.startsWith("file:", ignoreCase = true)) return url
+        return runCatching {
+            val path = java.nio.file.Paths.get(java.net.URI(url)).toAbsolutePath()
+            val encoded = path.toUri().toASCIIString() // file:///... with %XX escapes
+            if (encoded.startsWith("file:///")) encoded else "file://" + encoded.removePrefix("file:")
+        }.getOrElse { url }
+    }
 }

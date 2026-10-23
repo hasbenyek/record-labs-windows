@@ -46,6 +46,29 @@ class LinuxVlcPlaybackTest {
     }
 
     @Test
+    fun playsLocalFileFromJavaFileUri() {
+        if (Platform.isWindows || !libVlcAvailable()) return
+        // Local music and cached songs reach the player as File.toURI() strings
+        // ("file:/..."), including spaces and non-ASCII names.
+        val dir = kotlin.io.path.createTempDirectory("rl-local").toFile()
+        // Non-ASCII file names need a UTF-8 locale (every desktop has one; bare containers may not).
+        val utf8Names = System.getProperty("sun.jnu.encoding").orEmpty().contains("UTF-8", ignoreCase = true)
+        val file = File(dir, if (utf8Names) "lagu tes é.wav" else "lagu tes.wav").apply { writeBytes(toneWav(seconds = 2)) }
+        val player = WindowsMediaPlayer()
+        var ended = false
+        player.onPlaybackEnded = { ended = true }
+        try {
+            player.play(Track(id = "local", title = "Local", artist = "Test", durationMs = 2000), file.toURI().toString())
+            assertTrue(waitFor(6000) { player.isReady && player.positionMs > 200 }, "local file starts: ${player.state.value}")
+            assertNull(player.lastError)
+            assertTrue(waitFor(6000) { ended }, "local file ends: ${player.state.value}")
+        } finally {
+            player.release()
+            dir.deleteRecursively()
+        }
+    }
+
+    @Test
     fun playsPausesSeeksRetunesAndEnds() {
         if (Platform.isWindows || !libVlcAvailable()) {
             println("LinuxVlcPlaybackTest skipped (Windows or no libVLC)")

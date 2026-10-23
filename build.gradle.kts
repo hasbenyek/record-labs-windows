@@ -91,7 +91,8 @@ dependencies {
     implementation("org.openjfx:javafx-graphics:21.0.2:$javaFxClassifier")
     implementation("org.openjfx:javafx-controls:21.0.2:$javaFxClassifier")
     implementation("org.openjfx:javafx-media:21.0.2:$javaFxClassifier")
-    implementation("org.openjfx:javafx-web:21.0.2:$javaFxClassifier")
+    // JavaFX WebView is not used by the app; Linux packages leave it out (~40 MB).
+    if (isWindowsHost) implementation("org.openjfx:javafx-web:21.0.2:$javaFxClassifier")
     testImplementation(kotlin("test"))
 }
 
@@ -154,7 +155,15 @@ compose.desktop {
             )
             // Windows certificate store access exists only in Windows JDKs.
             if (isWindowsHost) modules("jdk.crypto.mscapi")
-            includeAllModules = true
+            // Windows keeps the full runtime as before. Linux ships only the modules
+            // the app needs (jdeps + reflection users such as locale data, TLS, Rhino).
+            includeAllModules = isWindowsHost
+            if (!isWindowsHost) modules(
+                "java.desktop", "java.datatransfer", "java.instrument", "java.logging", "java.net.http",
+                "java.prefs", "java.scripting", "java.sql", "java.xml", "java.security.jgss",
+                "jdk.localedata", "jdk.charsets", "jdk.zipfs", "jdk.jsobject", "jdk.xml.dom", "jdk.net",
+                "jdk.security.auth", "jdk.accessibility", "jdk.naming.dns",
+            )
             outputBaseDir.set(project.layout.buildDirectory.dir("compose-0.1.2-final/binaries"))
             if (isWindowsHost) {
                 targetFormats(
@@ -194,6 +203,14 @@ compose.desktop {
         buildTypes.release.proguard {
             isEnabled.set(false)
         }
+    }
+}
+
+// Windows VLC and the .NET helper live in src/main/resources for the Windows
+// build; Linux packages bundle their own VLC, so keep ~185 MB of DLLs out of the jar.
+if (!isWindowsHost) {
+    tasks.named<ProcessResources>("processResources") {
+        exclude("vlc/**", "win-x64/**", "*.dll")
     }
 }
 
