@@ -42,6 +42,39 @@ This repository has its own Gradle wrapper, so from a clone:
 Releases on this repository's GitHub page (tag `vX.Y.Z` with the `.msi` attached)
 are picked up by the app's in-app updater.
 
+## Linux
+
+The same sources build Record Labs for Linux (Ubuntu, Debian, Fedora, openSUSE,
+Arch). Linux uses libVLC for audio instead of the Windows media helper; VLC,
+yt-dlp and Deno are bundled, so users install nothing else.
+
+Installers (built by `.github/workflows/linux.yml` on Ubuntu 22.04 and tested in
+clean containers of each distribution, attached to the release for `vX.Y.Z` tags):
+
+| File | For | Install |
+|---|---|---|
+| `record-labs_X.Y.Z_amd64.deb` | Ubuntu, Debian, Mint, Pop!_OS | `sudo apt install ./record-labs_X.Y.Z_amd64.deb` |
+| `record-labs-X.Y.Z-1.x86_64.rpm` | Fedora | `sudo dnf install ./record-labs-X.Y.Z-1.x86_64.rpm` |
+| | openSUSE | `sudo zypper install --allow-unsigned-rpm ./record-labs-X.Y.Z-1.x86_64.rpm` |
+| `RecordLabs-X.Y.Z-x86_64.AppImage` | any distribution | `chmod +x RecordLabs-*.AppImage` and run it |
+| `record-labs-X.Y.Z-linux-x86_64.tar.xz` + `PKGBUILD` | Arch (AUR `record-labs-bin`) | `makepkg -si` next to the PKGBUILD |
+
+The in-app updater handles the AppImage (replaces itself) and the .deb/.rpm
+(installs through the system password dialog after the app closes). Arch
+installs are updated through the AUR.
+
+Building locally on Linux (Ubuntu 22.04 or newer):
+
+```sh
+sudo apt install openjdk-21-jdk libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot xz-utils curl unzip
+packaging/linux/build-all.sh            # -> build/linux-packages/
+./gradlew run                           # development run (after fetch-tools.sh / bundle-vlc.sh)
+packaging/linux/test-install.sh fedora:42 build/linux-packages/record-labs-*.rpm --gui   # needs Docker
+```
+
+`record-labs --self-test-audio` plays a test tone through the real audio path
+and exits with PASS/FAIL, which is how the container tests check each package.
+
 ## Listen Together
 
 Listen Together uses the Record Labs server, which only accepts official builds.
