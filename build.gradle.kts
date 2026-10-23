@@ -8,6 +8,15 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose") version "2.3.21"
 }
 
+// Windows and Linux are built from the same sources. Each build targets the OS
+// it runs on (jpackage can't cross-build), so Linux packages come from a Linux
+// machine or CI.
+val hostOs: String = System.getProperty("os.name").lowercase()
+val isWindowsHost = hostOs.startsWith("windows")
+val isLinuxHost = hostOs.contains("linux")
+val javaFxClassifier = if (isWindowsHost) "win" else if (isLinuxHost) "linux" else "mac"
+val nativeResourceDir = if (isWindowsHost) "windows-x64" else "linux-x64"
+
 group = "com.recordlabs.desktop"
 version = "0.1.2"
 
@@ -78,11 +87,11 @@ dependencies {
     implementation("net.java.dev.jna:jna-platform:5.6.0")
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
     implementation("io.coil-kt.coil3:coil-network-ktor3:3.3.0")
-    implementation("org.openjfx:javafx-base:21.0.2:win")
-    implementation("org.openjfx:javafx-graphics:21.0.2:win")
-    implementation("org.openjfx:javafx-controls:21.0.2:win")
-    implementation("org.openjfx:javafx-media:21.0.2:win")
-    implementation("org.openjfx:javafx-web:21.0.2:win")
+    implementation("org.openjfx:javafx-base:21.0.2:$javaFxClassifier")
+    implementation("org.openjfx:javafx-graphics:21.0.2:$javaFxClassifier")
+    implementation("org.openjfx:javafx-controls:21.0.2:$javaFxClassifier")
+    implementation("org.openjfx:javafx-media:21.0.2:$javaFxClassifier")
+    implementation("org.openjfx:javafx-web:21.0.2:$javaFxClassifier")
     testImplementation(kotlin("test"))
 }
 
@@ -119,7 +128,7 @@ val compileNativePlayer by tasks.registering(Exec::class) {
 compose.desktop {
     application {
         mainClass = "com.recordlabs.desktop.MainKt"
-        jvmArgs("-Djava.library.path=src/appResources/windows-x64")
+        jvmArgs("-Djava.library.path=src/appResources/$nativeResourceDir")
         // Memory: a ceiling for the Java heap and a collector that hands unused
         // memory back to Windows (periodic GC while idle, smaller free margin).
         jvmArgs(
@@ -132,7 +141,8 @@ compose.desktop {
         )
 
         nativeDistributions {
-            jvmArgs("-Djava.library.path=${'$'}APPDIR/resources;${'$'}APPDIR/resources/vlc")
+            val librarySeparator = if (isWindowsHost) ";" else ":"
+            jvmArgs("-Djava.library.path=${'$'}APPDIR/resources$librarySeparator${'$'}APPDIR/resources/vlc")
             modules(
                 "jdk.unsupported",
                 "jdk.unsupported.desktop",
@@ -140,15 +150,26 @@ compose.desktop {
                 "java.naming",
                 "java.management",
                 "jdk.crypto.ec",
-                "jdk.crypto.mscapi",
                 "jdk.crypto.cryptoki",
             )
+            // Windows certificate store access exists only in Windows JDKs.
+            if (isWindowsHost) modules("jdk.crypto.mscapi")
             includeAllModules = true
             outputBaseDir.set(project.layout.buildDirectory.dir("compose-0.1.2-final/binaries"))
-            targetFormats(
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
-                org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
-            )
+            if (isWindowsHost) {
+                targetFormats(
+                    org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
+                    org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
+                )
+            } else {
+                // .deb (Ubuntu/Debian) and .rpm (Fedora/openSUSE). The AppImage
+                // and the Arch package are made from createDistributable by
+                // packaging/linux scripts.
+                targetFormats(
+                    org.jetbrains.compose.desktop.application.dsl.TargetFormat.Deb,
+                    org.jetbrains.compose.desktop.application.dsl.TargetFormat.Rpm,
+                )
+            }
             packageName = "Record Labs"
             packageVersion = "0.1.2"
             description = "Record Labs desktop music player"
@@ -159,6 +180,15 @@ compose.desktop {
                 dirChooser = true
                 iconFile.set(project.file("src/main/resources/recordlabs.ico"))
             }
+            linux {
+                packageName = "record-labs"
+                shortcut = true
+                menuGroup = "AudioVideo;Audio;Player"
+                appCategory = "sound"
+                debMaintainer = "Record Labs <hasbenyek@users.noreply.github.com>"
+                rpmLicenseType = "Proprietary"
+                iconFile.set(project.file("src/main/resources/recordlabs.png"))
+            }
             appResourcesRootDir.set(project.layout.projectDirectory.dir("src/appResources"))
         }
         buildTypes.release.proguard {
@@ -167,8 +197,11 @@ compose.desktop {
     }
 }
 
-tasks.matching { it.name == "prepareAppResources" || it.name == "packageExe" || it.name == "packageMsi" }
-    .configureEach { dependsOn(copyJavaFxMediaNatives, compileNativePlayer, copyVlcNatives) }
+// The .NET media helper, JavaFX DLLs and Windows VLC are Windows-only inputs.
+if (isWindowsHost) {
+    tasks.matching { it.name == "prepareAppResources" || it.name == "packageExe" || it.name == "packageMsi" }
+        .configureEach { dependsOn(copyJavaFxMediaNatives, compileNativePlayer, copyVlcNatives) }
+}
 
 val packageExeWithFirewall by tasks.registering(Exec::class) {
     dependsOn("createDistributable", "unzipWix")
@@ -211,7 +244,7 @@ val packageExeWithFirewall by tasks.registering(Exec::class) {
     )
 }
 
-afterEvaluate {
+if (isWindowsHost) afterEvaluate {
     tasks.named("packageExe").configure {
         actions.clear()
         dependsOn(packageExeWithFirewall)

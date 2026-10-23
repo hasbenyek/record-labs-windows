@@ -247,14 +247,22 @@ fun ensureJavaFxMediaNatives() {
                     add(File(installRoot, "app/resources"))
                 }
             }
-            add(File(System.getProperty("user.dir"), "src/appResources/windows-x64/vlc"))
-            add(File("src/appResources/windows-x64/vlc"))
-            add(File(System.getProperty("user.dir"), "src/main/resources/vlc"))
-            add(File("src/main/resources/vlc"))
+            val nativeDir = com.recordlabs.desktop.data.Platform.nativeResourceDirName
+            add(File(System.getProperty("user.dir"), "src/appResources/$nativeDir/vlc"))
+            add(File("src/appResources/$nativeDir/vlc"))
+            if (com.recordlabs.desktop.data.Platform.isWindows) {
+                add(File(System.getProperty("user.dir"), "src/main/resources/vlc"))
+                add(File("src/main/resources/vlc"))
+            }
         }
 
+        // Windows ships libvlc.dll; Linux bundles libvlc.so (+ .so.5). When a
+        // Linux build has no bundled copy, vlcj's own discovery finds the
+        // system VLC (/usr/lib...) instead.
+        val libraryNames = if (com.recordlabs.desktop.data.Platform.isWindows) listOf("libvlc.dll")
+            else listOf("libvlc.so", "libvlc.so.5")
         val vlcDir = candidates.map(File::getAbsoluteFile).firstOrNull { dir ->
-            dir.isDirectory && File(dir, "libvlc.dll").isFile
+            dir.isDirectory && libraryNames.any { File(dir, it).isFile }
         }
 
         if (vlcDir != null) {
@@ -262,6 +270,12 @@ fun ensureJavaFxMediaNatives() {
             NativeLibrary.addSearchPath("libvlccore", vlcDir.absolutePath)
             val pluginsDir = File(vlcDir, "plugins").takeIf { it.isDirectory } ?: vlcDir
             System.setProperty("VLC_PLUGIN_PATH", pluginsDir.absolutePath)
+            if (!com.recordlabs.desktop.data.Platform.isWindows) {
+                // libvlc reads the real environment variable, and a bundled
+                // Linux libvlc would otherwise search its build-time /usr path.
+                runCatching { uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv("VLC_PLUGIN_PATH", pluginsDir.absolutePath, 1) }
+                    .onFailure { logArtwork("setenv VLC_PLUGIN_PATH failed: ${it.message}") }
+            }
             System.setProperty("jna.library.path", vlcDir.absolutePath)
             System.setProperty("jna.load_library_altered_search_path", "true")
             logArtwork("VLC natives configured from: ${vlcDir.absolutePath}")
