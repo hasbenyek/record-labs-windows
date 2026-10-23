@@ -17,6 +17,14 @@ import kotlin.math.sin
  * exit code. Used to check installed packages on each Linux distribution.
  */
 internal fun runAudioSelfTest(): Int {
+    // The stream fallbacks (yt-dlp) and signature decoding (Deno) must start.
+    val toolsOk = listOf("yt-dlp", "deno").all { tool ->
+        val file = com.recordlabs.desktop.data.BundledTools.find(tool)
+        val version = file?.let { runToolVersion(it) }
+        println(if (version != null) "SELF-TEST tool $tool: $version (${file?.absolutePath})" else "SELF-TEST FAIL: $tool not runnable (${file?.absolutePath ?: "missing"})")
+        version != null
+    }
+    if (!toolsOk) return 1
     val wav = selfTestToneWav(seconds = 3)
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/tone.wav") { exchange ->
@@ -49,6 +57,16 @@ internal fun runAudioSelfTest(): Int {
         server.stop(0)
     }
 }
+
+private fun runToolVersion(file: java.io.File): String? = runCatching {
+    val process = ProcessBuilder(file.absolutePath, "--version").redirectErrorStream(true).start()
+    if (!process.waitFor(30, java.util.concurrent.TimeUnit.SECONDS)) {
+        process.destroyForcibly()
+        return@runCatching null
+    }
+    process.inputStream.bufferedReader().readText().lineSequence().firstOrNull()?.trim()
+        ?.takeIf { process.exitValue() == 0 && it.isNotBlank() }
+}.getOrNull()
 
 private fun waitUntil(timeoutMs: Long, condition: () -> Boolean): Boolean {
     val deadline = System.currentTimeMillis() + timeoutMs
