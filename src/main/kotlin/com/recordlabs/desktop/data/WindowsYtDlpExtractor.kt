@@ -10,8 +10,8 @@ import kotlin.concurrent.thread
  */
 object WindowsYtDlpExtractor {
     fun audioStream(videoId: String): String? = runCatching {
-        val ytDlp = executable("yt-dlp.exe") ?: return null
-        val deno = executable("deno.exe") ?: return null
+        val ytDlp = BundledTools.find("yt-dlp") ?: return null
+        val deno = BundledTools.find("deno") ?: return null
         val process = ProcessBuilder(
             ytDlp.absolutePath,
             "--no-config",
@@ -45,14 +45,4 @@ object WindowsYtDlpExtractor {
             lines.lastOrNull { it.startsWith("https://") || it.startsWith("http://") }
         }
     }.getOrNull()
-
-    private fun executable(name: String): File? {
-        val resourceDir = System.getProperty("compose.application.resources.dir")
-        val candidates = buildList {
-            if (!resourceDir.isNullOrBlank()) add(File(resourceDir, name))
-            add(File("src/appResources/windows-x64/$name"))
-            add(File("windows-recordlabs/src/appResources/windows-x64/$name"))
-        }
-        return candidates.map(File::getAbsoluteFile).firstOrNull(File::isFile)
-    }
 }

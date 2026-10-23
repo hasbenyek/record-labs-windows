@@ -2,22 +2,23 @@ package com.recordlabs.desktop.data
 
 import java.io.File
 
-/** Stable app storage shared by updates of the same Windows installation. */
+/**
+ * Stable app storage shared by updates of the same installation.
+ * Windows: %LOCALAPPDATA%\RecordLabs\<installId>. Linux: ~/.local/share/record-labs/default.
+ */
 object WindowsStorage {
-    private val appData = System.getenv("LOCALAPPDATA")
-        ?: System.getenv("APPDATA")
-        ?: (System.getProperty("user.home") + "/AppData/Local")
-
     private val installRoot = System.getProperty("compose.application.resources.dir")
         ?.let(::File)?.parentFile?.parentFile
-    val installId: String = installRoot?.let { root ->
+    val installId: String = if (Platform.usesStableInstallId) {
+        if (installRoot == null) "development" else "default"
+    } else installRoot?.let { root ->
         // Keep the same prefix used by the former "prefix-timestamp" IDs so
         // their preferences and media directory can be migrated in place.
         root.absolutePath.hashCode().toUInt().toString(16)
     } ?: "development"
 
     val directory: File by lazy {
-        val parent = File(appData, "RecordLabs").apply { mkdirs() }
+        val parent = Platform.dataRoot.apply { mkdirs() }
         val target = if (File(parent, installId).exists()) {
             File(parent, installId)
         } else {

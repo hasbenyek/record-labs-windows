@@ -275,7 +275,7 @@ object WindowsRecordLabsConnect {
         outboundSocket = null
         tcpServer?.close()
         tcpServer = null
-        tcpLinks.toList().forEach(TcpLink::close)
+        tcpLinks.toTypedArray().forEach(TcpLink::close)
         tcpLinks.clear()
         synchronized(seen) {
             seen.clear()
@@ -487,7 +487,7 @@ object WindowsRecordLabsConnect {
         }
         // Links that went quiet (peer gone, Wi-Fi switched) or stopped reading are dropped.
         val nowMs = System.currentTimeMillis()
-        tcpLinks.toList().forEach { link ->
+        tcpLinks.toTypedArray().forEach { link ->
             val stalledWrite = link.writeStartedAt.let { it > 0L && nowMs - it > LINK_WRITE_STALL_MS }
             if (stalledWrite || nowMs - link.lastRxAt > LINK_DEAD_MS) link.close()
         }
@@ -566,7 +566,7 @@ object WindowsRecordLabsConnect {
             // Ownership/state handoff uses the persistent validated TCP link.
             // Send it before optional Bluetooth and UDP work so switching the
             // output device can never be delayed by a fallback transport.
-            tcpLinks.toList().forEach { it.send(payload) }
+            tcpLinks.toTypedArray().forEach { it.send(payload) }
             bluetoothSender?.invoke(payload)
             runCatching {
                 val bytes = payload.toByteArray(Charsets.UTF_8)

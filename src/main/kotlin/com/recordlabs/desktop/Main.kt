@@ -615,7 +615,33 @@ private class DesktopFullscreenController(
 
     fun setFullscreen(enabled: Boolean) = onAwtThread {
         if (enabled == active) return@onAwtThread
+        if (!com.recordlabs.desktop.data.Platform.isWindows) {
+            // Linux (X11/Wayland): the window manager owns fullscreen; ask it
+            // through AWT instead of Win32 window styles.
+            linuxFullscreen(enabled)
+            return@onAwtThread
+        }
         if (enabled) enter() else leave()
+    }
+
+    private var linuxPreviousBounds: java.awt.Rectangle? = null
+
+    private fun linuxFullscreen(enabled: Boolean) {
+        val device = frame.graphicsConfiguration.device
+        runCatching {
+            if (enabled) {
+                linuxPreviousBounds = java.awt.Rectangle(frame.bounds)
+                if (device.isFullScreenSupported) device.fullScreenWindow = frame
+                else {
+                    frame.extendedState = java.awt.Frame.NORMAL
+                    frame.bounds = java.awt.Rectangle(frame.graphicsConfiguration.bounds)
+                }
+            } else {
+                if (device.fullScreenWindow === frame) device.fullScreenWindow = null
+                linuxPreviousBounds?.let { frame.bounds = it }
+            }
+        }.onFailure { it.printStackTrace() }
+        active = enabled
     }
 
     private fun enter() {
@@ -786,7 +812,8 @@ fun main() {
             val currentlyFullscreen by rememberUpdatedState(isFullscreen)
 
             LaunchedEffect(window) {
-                try {
+                // Dark title bar through DWM exists only on Windows.
+                if (com.recordlabs.desktop.data.Platform.isWindows) try {
                     val hwnd = com.sun.jna.platform.win32.WinDef.HWND(com.sun.jna.Native.getWindowPointer(window))
                     val useDarkMode = com.sun.jna.ptr.IntByReference(1)
                     val result = RecordLabsDwmapi.INSTANCE.DwmSetWindowAttribute(hwnd, 20, useDarkMode, 4)
@@ -1727,7 +1754,7 @@ private fun RecordLabsWindow(
             }
             WindowsRecordLabsConnect.start(
                 accountKeys = accountKeys,
-                deviceName = System.getenv("COMPUTERNAME").orEmpty().ifBlank { "Windows PC" },
+                deviceName = com.recordlabs.desktop.data.Platform.deviceName,
                 playbackProvider = {
                     ConnectPlaybackState(
                         ownerId = WindowsPreferences.connectDeviceId(),

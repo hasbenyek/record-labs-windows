@@ -18,3 +18,6 @@ native-player/obj/
 # Logs and crash dumps
 *.log
 hs_err_pid*.log
+
+# Linux helper programs and VLC are downloaded by packaging/linux scripts
+src/appResources/linux-x64/

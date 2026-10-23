@@ -132,6 +132,9 @@ object AppUpdater {
     /** Looks for a newer release. [manual] shows "Checking…" and reports problems. */
     suspend fun check(manual: Boolean) {
         if (!configured) return
+        // Releases only carry Windows installers so far; the Linux updater
+        // (AppImage / .deb / .rpm) comes with the Linux packages.
+        if (!Platform.isWindows) return
         checkLock.withLock {
             val before = state.value
             // A download in progress or a ready installer is left alone.

@@ -948,7 +948,7 @@ private fun StorageSettings() {
     }
     SettingsGroup("Location") {
         SettingRow("Record Labs data", WindowsStorage.directory.absolutePath, value = "Open folder") {
-            runCatching { java.awt.Desktop.getDesktop().open(WindowsStorage.directory) }
+            com.recordlabs.desktop.data.Platform.openFolder(WindowsStorage.directory)
         }
     }
 }
@@ -1049,7 +1049,7 @@ private fun UpdateSection() {
                 GlassButton(prominent = true, onClick = { AppUpdater.lastInstallProblem.value = null; AppUpdater.download() }) { Text("Update now") }
             } else {
                 // A development run has no installer to replace: offer the release page.
-                GlassButton(prominent = true, onClick = { runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI(state.release.pageUrl)) } }) { Text("Open release page") }
+                GlassButton(prominent = true, onClick = { com.recordlabs.desktop.data.Platform.openUrl(state.release.pageUrl) }) { Text("Open release page") }
             }
         }
         is AppUpdater.State.Downloading -> UpdateCard(
@@ -1332,7 +1332,7 @@ internal fun LastFmIntegrationPage() {
             DiscordTemplateRow("API key", apiKey, "", maxLength = 64, placeholders = false) { apiKey = it }
             DiscordTemplateRow("Shared secret", if (secret.isBlank()) "" else "••••••••", "", maxLength = 64, placeholders = false, initialText = secret) { secret = it }
             SettingRow("Get an API account", "Opens last.fm in your browser") {
-                runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI("https://www.last.fm/api/account/create")) }
+                com.recordlabs.desktop.data.Platform.openUrl("https://www.last.fm/api/account/create")
             }
         }
         SettingsGroup("Account") {

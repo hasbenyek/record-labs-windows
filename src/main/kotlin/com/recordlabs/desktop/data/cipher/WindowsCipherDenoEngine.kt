@@ -100,13 +100,7 @@ class WindowsCipherDenoEngine(
     private val sigInfo: WindowsFunctionNameExtractor.SigFunctionInfo?,
     private val nFuncInfo: WindowsFunctionNameExtractor.NFunctionInfo?
 ) {
-    private val deno: File? by lazy { executable("deno.exe") }
-
-    private fun executable(name: String): File? {
-        val resourceDir = System.getProperty("compose.application.resources.dir")
-            ?: File(System.getProperty("user.dir"), "src/appResources/windows-x64").absolutePath
-        return File(resourceDir, name).takeIf { it.exists() }
-    }
+    private val deno: File? by lazy { com.recordlabs.desktop.data.BundledTools.find("deno") }
 
     suspend fun deobfuscateSignature(signature: String): String = withContext(Dispatchers.IO) {
         val d = deno

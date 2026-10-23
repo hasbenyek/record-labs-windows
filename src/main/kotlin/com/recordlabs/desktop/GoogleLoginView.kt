@@ -152,9 +152,11 @@ private object BrowserGoogleLogin {
         // the URL to an already-running normal browser instance. When that
         // happened, the user could sign in successfully while Record Labs was
         // watching a different DevTools port forever.
-        val profileRoot = File(
-            System.getenv("LOCALAPPDATA") ?: System.getProperty("java.io.tmpdir"),
-            "RecordLabs/GoogleLoginBrowser",
+        val profileRoot = (
+            if (com.recordlabs.desktop.data.Platform.isWindows) File(
+                System.getenv("LOCALAPPDATA") ?: System.getProperty("java.io.tmpdir"),
+                "RecordLabs/GoogleLoginBrowser",
+            ) else File(com.recordlabs.desktop.data.Platform.cacheRoot, "GoogleLoginBrowser")
         ).apply { mkdirs() }
         val profile = File(profileRoot, "Attempt-${UUID.randomUUID()}").apply { mkdirs() }
         val process = ProcessBuilder(
@@ -336,6 +338,7 @@ private object BrowserGoogleLogin {
     }
 
     private fun findBrowser(): File? {
+        if (!com.recordlabs.desktop.data.Platform.isWindows) return findLinuxBrowser()
         findWindowsDefaultBrowser()?.takeIf(File::isFile)?.let { return it }
         val roots = listOfNotNull(
             System.getenv("ProgramFiles(x86)"),
@@ -350,6 +353,34 @@ private object BrowserGoogleLogin {
         return roots.asSequence()
             .flatMap { root -> relativePaths.asSequence().map { File(root, it) } }
             .firstOrNull(File::isFile)
+    }
+
+    /**
+     * Linux: Chromium-based browsers from distro packages, Flatpak exports or
+     * vendor folders. The login flow needs Chromium's DevTools port, so
+     * Firefox can't be used here.
+     */
+    private fun findLinuxBrowser(): File? {
+        val names = listOf(
+            "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+            "brave-browser", "brave", "microsoft-edge", "microsoft-edge-stable", "vivaldi", "vivaldi-stable",
+        )
+        val pathDirs = System.getenv("PATH").orEmpty().split(File.pathSeparator).filter(String::isNotBlank)
+        val fixed = listOf(
+            "/opt/google/chrome/google-chrome",
+            "/opt/brave.com/brave/brave-browser",
+            "/opt/microsoft/msedge/microsoft-edge",
+            "/var/lib/flatpak/exports/bin/com.google.Chrome",
+            "/var/lib/flatpak/exports/bin/org.chromium.Chromium",
+            "/var/lib/flatpak/exports/bin/com.brave.Browser",
+            "/var/lib/flatpak/exports/bin/com.microsoft.Edge",
+            System.getProperty("user.home") + "/.local/share/flatpak/exports/bin/com.google.Chrome",
+            System.getProperty("user.home") + "/.local/share/flatpak/exports/bin/org.chromium.Chromium",
+            System.getProperty("user.home") + "/.local/share/flatpak/exports/bin/com.brave.Browser",
+            "/snap/bin/chromium",
+        )
+        return (names.asSequence().flatMap { name -> pathDirs.asSequence().map { File(it, name) } } + fixed.asSequence().map(::File))
+            .firstOrNull { it.isFile && it.canExecute() }
     }
 
     /** Resolve the Windows HTTPS association so login opens in the user's chosen browser. */
