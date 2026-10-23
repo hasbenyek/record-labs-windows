@@ -718,7 +718,9 @@ private val globalCatalogCache = mutableMapOf<CatalogDestination, CatalogPageDat
 // Artist pages whose full Top songs list is already in [globalCatalogCache].
 private val expandedArtistPages = mutableSetOf<CatalogDestination>()
 
-fun main() {
+fun main(args: Array<String>) {
+    // Packaging check: play a tone through the real audio path, no window.
+    if ("--self-test-audio" in args) kotlin.system.exitProcess(runAudioSelfTest())
     // Load JavaFX media natives before the off-screen video decoder starts.
     ensureJavaFxMediaNatives()
     val shutdownAction = {
