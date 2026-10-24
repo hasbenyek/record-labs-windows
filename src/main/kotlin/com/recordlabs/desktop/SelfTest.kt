@@ -25,6 +25,7 @@ internal fun runAudioSelfTest(): Int {
         version != null
     }
     if (!toolsOk) return 1
+    println("SELF-TEST font: ${AppFonts.description}")
     val wav = selfTestToneWav(seconds = 3)
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/tone.wav") { exchange ->
@@ -87,4 +88,28 @@ private fun selfTestToneWav(seconds: Int, sampleRate: Int = 44100): ByteArray {
         putShort(2); putShort(16); put("data".toByteArray()); putInt(samples * 2)
     }
     return ByteArrayOutputStream().apply { write(header.array()); write(data.array()) }.toByteArray()
+}
+
+/**
+ * `record-labs --self-test-login`: lists the browsers Google login can use on
+ * Linux (default first). With -Drecordlabs.loginUrl=<url> it also runs the
+ * whole login flow against that page and checks a SAPISID session was saved.
+ */
+internal fun runLoginSelfTest(): Int {
+    val browsers = LinuxLoginBrowser.all()
+    if (browsers.isEmpty()) println("LOGIN-TEST no usable browser found")
+    browsers.forEach { println("LOGIN-TEST browser: ${it.name} engine=${it.engine} sandbox=${it.sandbox} default=${it.isDefault} command=${it.command}") }
+    println("LOGIN-TEST would open: ${LinuxLoginBrowser.find()?.name ?: "none"}")
+    if (System.getProperty("recordlabs.loginUrl").isNullOrBlank()) return if (browsers.isEmpty()) 1 else 0
+    com.recordlabs.desktop.data.WindowsPreferences.clearGoogleSession()
+    val result = kotlinx.coroutines.runBlocking { BrowserGoogleLogin.login { println("LOGIN-TEST progress: $it") } }
+    val session = com.recordlabs.desktop.data.WindowsPreferences.googleSession()
+    return if (result.isSuccess && session != null) {
+        println("LOGIN-TEST PASS: session saved (${session.cookie.split(';').size} cookies)")
+        com.recordlabs.desktop.data.WindowsPreferences.clearGoogleSession()
+        0
+    } else {
+        println("LOGIN-TEST FAIL: ${result.exceptionOrNull()?.message}")
+        1
+    }
 }

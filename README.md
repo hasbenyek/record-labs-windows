@@ -63,6 +63,13 @@ The in-app updater handles the AppImage (replaces itself) and the .deb/.rpm
 (installs through the system password dialog after the app closes). Arch
 installs are updated through the AUR.
 
+One-command scripts at the repository root (guide in Indonesian: `PANDUAN-LINUX.txt`):
+
+```sh
+./run-linux.sh               # run from source, no installer (installs Java 21 + VLC if missing)
+./build-installer-linux.sh   # build the .deb/.rpm/kit and offer to install it (Pop!_OS/Ubuntu/Debian)
+```
+
 Building locally on Linux (Ubuntu 22.04 or newer):
 
 ```sh

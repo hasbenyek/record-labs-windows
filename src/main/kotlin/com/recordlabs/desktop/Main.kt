@@ -721,6 +721,7 @@ private val expandedArtistPages = mutableSetOf<CatalogDestination>()
 fun main(args: Array<String>) {
     // Packaging check: play a tone through the real audio path, no window.
     if ("--self-test-audio" in args) kotlin.system.exitProcess(runAudioSelfTest())
+    if ("--self-test-login" in args) kotlin.system.exitProcess(runLoginSelfTest())
     // Load JavaFX media natives before the off-screen video decoder starts.
     ensureJavaFxMediaNatives()
     val shutdownAction = {
@@ -971,7 +972,7 @@ private fun RecordLabsWindow(
             onBackground = Color.White,
             onSurface = Color.White,
         ),
-        typography = androidx.compose.material.Typography(defaultFontFamily = FontFamily.Default),
+        typography = androidx.compose.material.Typography(defaultFontFamily = AppFonts.family),
         shapes = Shapes(
             small = RoundedCornerShape(14.dp),
             medium = RoundedCornerShape(22.dp),
@@ -4539,7 +4540,7 @@ private fun ListenTogetherTextField(
     val style = androidx.compose.ui.text.TextStyle(
         color = if (enabled) Color.White else SecondaryText,
         fontSize = if (monospace) 17.sp else 15.sp,
-        fontFamily = if (monospace) androidx.compose.ui.text.font.FontFamily.Monospace else null,
+        fontFamily = if (monospace) androidx.compose.ui.text.font.FontFamily.Monospace else AppFonts.family,
         letterSpacing = if (monospace) 3.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
         fontWeight = if (monospace) FontWeight.SemiBold else null,
     )
@@ -5773,7 +5774,7 @@ private fun LibrarySearchField(query: String, onQueryChange: (String) -> Unit, m
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp, fontFamily = AppFonts.family),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
                 modifier = Modifier.fillMaxWidth().trackTextInputFocus(),
             )
@@ -10285,6 +10286,7 @@ private fun TimedLyricText(
                 val letterMeasurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 0)
                 val letterStyle = androidx.compose.material.LocalTextStyle.current.merge(
                     androidx.compose.ui.text.TextStyle(
+                        fontFamily = AppFonts.family,
                         fontSize = layoutSize.sp,
                         lineHeight = (layoutSize * 1.42f).sp,
                         fontWeight = FontWeight.Bold,

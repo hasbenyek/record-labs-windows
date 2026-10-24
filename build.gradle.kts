@@ -93,6 +93,8 @@ dependencies {
     implementation("org.openjfx:javafx-media:21.0.2:$javaFxClassifier")
     // JavaFX WebView is not used by the app; Linux packages leave it out (~40 MB).
     if (isWindowsHost) implementation("org.openjfx:javafx-web:21.0.2:$javaFxClassifier")
+    // Linux Google login with Firefox reads the temporary profile's cookies.sqlite.
+    if (!isWindowsHost) runtimeOnly("org.xerial:sqlite-jdbc:3.46.1.3")
     testImplementation(kotlin("test"))
 }
 
@@ -212,6 +214,17 @@ if (!isWindowsHost) {
     tasks.named<ProcessResources>("processResources") {
         exclude("vlc/**", "win-x64/**", "*.dll")
     }
+}
+
+// Linux: "./gradlew run" works from a fresh checkout like "gradlew.bat run" on
+// Windows; the bundled helper programs (yt-dlp, Deno) are downloaded on first use.
+if (isLinuxHost) {
+    val fetchLinuxTools by tasks.registering(Exec::class) {
+        val toolsDir = layout.projectDirectory.dir("src/appResources/linux-x64")
+        onlyIf { !toolsDir.file("yt-dlp").asFile.exists() || !toolsDir.file("deno").asFile.exists() }
+        commandLine("bash", layout.projectDirectory.file("packaging/linux/fetch-tools.sh").asFile.absolutePath)
+    }
+    tasks.matching { it.name == "run" || it.name == "createDistributable" }.configureEach { dependsOn(fetchLinuxTools) }
 }
 
 // The .NET media helper, JavaFX DLLs and Windows VLC are Windows-only inputs.
