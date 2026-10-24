@@ -3,7 +3,7 @@
 # Used by .github/workflows/linux.yml (Ubuntu 22.04) and for local builds.
 #
 # Needs (Ubuntu/Debian): openjdk-21-jdk (or any JDK 21 with jpackage),
-#   libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot
+#   binutils (objcopy, used by jlink) libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot
 #   xz-utils curl unzip; appimagetool on PATH (or $APPIMAGETOOL) for the AppImage.
 # Extra Gradle arguments can be passed in $GRADLE_ARGS (e.g. an init script).
 set -euo pipefail

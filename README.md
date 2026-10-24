@@ -73,7 +73,7 @@ One-command scripts at the repository root (guide in Indonesian: `PANDUAN-LINUX.
 Building locally on Linux (Ubuntu 22.04 or newer):
 
 ```sh
-sudo apt install openjdk-21-jdk libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot xz-utils curl unzip
+sudo apt install openjdk-21-jdk binutils libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot xz-utils curl unzip
 packaging/linux/build-all.sh            # -> build/linux-packages/
 ./gradlew run                           # development run (after fetch-tools.sh / bundle-vlc.sh)
 packaging/linux/test-install.sh fedora:42 build/linux-packages/record-labs-*.rpm --gui   # needs Docker

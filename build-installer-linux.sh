@@ -17,7 +17,7 @@ command -v apt-get >/dev/null || { echo "Script build ini untuk Pop!_OS/Ubuntu/D
 
 say "Memasang alat build (akan diminta password)…"
 sudo apt-get update -qq || true
-sudo apt-get install -y openjdk-21-jdk libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot xz-utils curl unzip
+sudo apt-get install -y openjdk-21-jdk binutils libvlc-dev vlc-plugin-base vlc-plugin-video-output patchelf rpm fakeroot xz-utils curl unzip
 
 sed -i 's/\r$//' gradlew 2>/dev/null || true
 chmod +x gradlew packaging/linux/*.sh
