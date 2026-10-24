@@ -859,6 +859,7 @@ internal fun MusicVideoFullscreenOverlay(
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             androidx.compose.material.MaterialTheme(
+                typography = androidx.compose.material.Typography(defaultFontFamily = AppFonts.family),
                 colors = androidx.compose.material.darkColors(
                     primary = MusicVideoFullscreen.accent,
                     secondary = MusicVideoFullscreen.accent,
