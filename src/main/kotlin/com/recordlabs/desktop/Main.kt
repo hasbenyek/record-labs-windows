@@ -634,25 +634,70 @@ private class DesktopFullscreenController(
      * "normal" window with its title bar off screen. Now a maximized window is
      * maximized again, and a normal window gets its old position and size.
      */
+    private var linuxUsedAwtFullscreen = false
+    private var linuxLeaveTimer: javax.swing.Timer? = null
+
     private fun linuxFullscreen(enabled: Boolean) {
         val device = frame.graphicsConfiguration.device
+        linuxLeaveTimer?.stop()
+        linuxLeaveTimer = null
         runCatching {
             if (enabled) {
                 val state = frame.extendedState
                 linuxWasMaximized = state and java.awt.Frame.MAXIMIZED_BOTH == java.awt.Frame.MAXIMIZED_BOTH
                 linuxPreviousBounds = java.awt.Rectangle(frame.bounds)
-                if (device.isFullScreenSupported) device.fullScreenWindow = frame
-                else {
-                    frame.extendedState = java.awt.Frame.NORMAL
-                    frame.bounds = java.awt.Rectangle(frame.graphicsConfiguration.bounds)
+                // Asked straight from the window manager (X11/XWayland); AWT's own
+                // fullscreen mode is only the fallback when that is not possible.
+                linuxUsedAwtFullscreen = !LinuxX11Window.requestFullscreen(frame, true)
+                if (linuxUsedAwtFullscreen) {
+                    if (device.isFullScreenSupported) device.fullScreenWindow = frame
+                    else {
+                        frame.extendedState = java.awt.Frame.NORMAL
+                        frame.bounds = java.awt.Rectangle(frame.graphicsConfiguration.bounds)
+                    }
                 }
+                active = true
             } else {
-                if (device.fullScreenWindow === frame) device.fullScreenWindow = null
                 active = false
-                linuxRestoreWindow(attempt = 0)
+                if (linuxUsedAwtFullscreen) {
+                    if (device.fullScreenWindow === frame) device.fullScreenWindow = null
+                    linuxRestoreWindow(attempt = 0)
+                } else {
+                    linuxLeaveFullscreen()
+                }
             }
         }.onFailure { it.printStackTrace() }
         active = enabled
+    }
+
+    /**
+     * Leaving fullscreen is only finished once the window manager reports the
+     * window as no longer fullscreen; until then the request is repeated
+     * (COSMIC sometimes dropped it, leaving the old-size app in the middle of a
+     * grey fullscreen surface). Then the previous size/maximized state returns.
+     */
+    private fun linuxLeaveFullscreen() {
+        LinuxX11Window.requestFullscreen(frame, false)
+        val started = System.currentTimeMillis()
+        var lastRequest = started
+        val timer = javax.swing.Timer(120, null)
+        timer.addActionListener {
+            if (active) { timer.stop(); return@addActionListener }
+            val now = System.currentTimeMillis()
+            val stillFullscreen = LinuxX11Window.isFullscreen(frame) == true
+            when {
+                !stillFullscreen || now - started > 3_000L -> {
+                    timer.stop()
+                    linuxRestoreWindow(attempt = 0)
+                }
+                now - lastRequest >= 500L -> {
+                    lastRequest = now
+                    LinuxX11Window.requestFullscreen(frame, false)
+                }
+            }
+        }
+        linuxLeaveTimer = timer
+        timer.start()
     }
 
     /** Re-applied a few times: some window managers finish leaving fullscreen after a delay and drop the first request. */
@@ -2313,6 +2358,29 @@ private fun RecordLabsWindow(
             }
             mediaPlayer.seekTo(position)
             currentTrack?.let { WindowsListenTogetherClient.broadcastPlayback("seek", it, position) }
+            if (!com.recordlabs.desktop.data.Platform.isWindows) com.recordlabs.desktop.data.LinuxMpris.seeked(position)
+        }
+        // Linux: keyboard media keys and the desktop's media controls arrive over
+        // MPRIS (D-Bus) and run the same commands as the Windows helper's keys.
+        if (!com.recordlabs.desktop.data.Platform.isWindows) {
+            val latestSeek by rememberUpdatedState(::seekPlayback)
+            DisposableEffect(Unit) {
+                val mpris = com.recordlabs.desktop.data.LinuxMpris
+                mpris.onCommand = { command -> scope.launch { latestNativeMediaCommand(command) } }
+                mpris.onSeekTo = { position -> scope.launch { latestSeek(position) } }
+                mpris.positionProvider = { mediaPlayer.positionMs }
+                mpris.onRaise = { java.awt.EventQueue.invokeLater { FloatingLyricsState.requestRestoreDesktop?.invoke() } }
+                mpris.start()
+                onDispose {
+                    mpris.onCommand = null
+                    mpris.onSeekTo = null
+                    mpris.onRaise = null
+                    mpris.stop()
+                }
+            }
+            LaunchedEffect(currentTrack?.id, isPlaying, playbackDurationMs) {
+                com.recordlabs.desktop.data.LinuxMpris.update(currentTrack, isPlaying, playbackDurationMs)
+            }
         }
         fun submitSearch(rawQuery: String) {
             val query = rawQuery.trim()

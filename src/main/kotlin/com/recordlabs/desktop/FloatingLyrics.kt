@@ -310,6 +310,15 @@ fun FloatingLyricsWindow(
         }
     }
 
+    // Linux: this window is drawn by Skiko's software renderer. Its OpenGL
+    // renderer can't give a Linux window a see-through background, so the
+    // floating lyrics showed up opaque instead of over the desktop like on
+    // Windows. Skiko reads the setting when the window is created (below, in
+    // this composition), so it is set just around that and the main window
+    // keeps OpenGL.
+    val linuxSoftwareRendering = !com.recordlabs.desktop.data.Platform.isWindows
+    val previousRenderApi = if (linuxSoftwareRendering) System.getProperty("skiko.renderApi") else null
+    if (linuxSoftwareRendering) System.setProperty("skiko.renderApi", "SOFTWARE")
     Window(
         onCloseRequest = onClose,
         state = windowState,
@@ -331,6 +340,10 @@ fun FloatingLyricsWindow(
         focusable = com.recordlabs.desktop.data.Platform.isWindows,
     ) {
         FloatingLyricsWindowBody(track, windowState, initialWidth, initialHeight, onClose)
+    }
+    if (linuxSoftwareRendering) {
+        if (previousRenderApi == null) System.clearProperty("skiko.renderApi")
+        else System.setProperty("skiko.renderApi", previousRenderApi)
     }
 }
 

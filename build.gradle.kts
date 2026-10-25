@@ -95,6 +95,10 @@ dependencies {
     if (isWindowsHost) implementation("org.openjfx:javafx-web:21.0.2:$javaFxClassifier")
     // Linux Google login with Firefox reads the temporary profile's cookies.sqlite.
     if (!isWindowsHost) runtimeOnly("org.xerial:sqlite-jdbc:3.46.1.3")
+    // Linux media keys and desktop media controls (MPRIS over D-Bus). Windows
+    // builds only compile against it; the class is never loaded there.
+    val dbusJava = listOf("com.github.hypfvieh:dbus-java-core:5.1.1", "com.github.hypfvieh:dbus-java-transport-native-unixsocket:5.1.1")
+    dbusJava.forEach { if (isWindowsHost) compileOnly(it) else implementation(it) }
     testImplementation(kotlin("test"))
 }
 

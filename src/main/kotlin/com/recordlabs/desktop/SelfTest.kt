@@ -26,6 +26,14 @@ internal fun runAudioSelfTest(): Int {
     }
     if (!toolsOk) return 1
     println("SELF-TEST font: ${AppFonts.description}; lyrics: ${AppFonts.lyricsDescription}")
+    // Floating lyrics need see-through windows (a compositing desktop).
+    runCatching {
+        if (!java.awt.GraphicsEnvironment.isHeadless()) {
+            val device = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().defaultScreenDevice
+            val translucent = device.isWindowTranslucencySupported(java.awt.GraphicsDevice.WindowTranslucency.PERPIXEL_TRANSLUCENT)
+            println("SELF-TEST transparent windows: ${if (translucent) "supported" else "NOT supported (floating lyrics get a solid background)"}")
+        }
+    }
     val wav = selfTestToneWav(seconds = 3)
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/tone.wav") { exchange ->

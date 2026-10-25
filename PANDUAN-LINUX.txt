@@ -45,6 +45,13 @@ Lirik (halaman lirik dan floating lyrics/PiP) memakai SF Pro Display kalau terpa
 tidak, Inter Display (gratis, mirip SF Pro, sudah termasuk di aplikasi).
 
 
+TOMBOL MEDIA KEYBOARD
+---------------------
+Play/pause, next, previous dan stop di keyboard bekerja lewat MPRIS (kontrol media standar
+Linux), juga saat Record Labs di belakang. Lagu yang diputar juga muncul di kontrol media
+desktop (COSMIC/GNOME/KDE).
+
+
 LISTEN TOGETHER
 ---------------
 Build resmi butuh kunci Listen Together di file  local.properties  (tidak ikut di folder ini):
