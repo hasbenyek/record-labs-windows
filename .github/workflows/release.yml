@@ -66,11 +66,40 @@ jobs:
       - name: Unit tests (audio through libVLC, Linux updater, Deno daemon)
         run: ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest" --tests "com.recordlabs.desktop.data.LinuxDenoCipherDaemonTest" --tests "com.recordlabs.desktop.data.LinuxFirewallTest"
 
+      # One download per package type (each is ~250 MB; together over 1 GB).
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-packages
-          path: build/linux-packages/*
+          name: linux-deb
+          path: build/linux-packages/*_amd64.deb
+          compression-level: 0
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-rpm
+          path: build/linux-packages/*.x86_64.rpm
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-appimage
+          path: |
+            build/linux-packages/*.AppImage
+            build/linux-packages/*.zsync
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arch
+          path: |
+            build/linux-packages/*-linux-x86_64.tar.xz
+            build/linux-packages/PKGBUILD
+          compression-level: 0
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-checksums
+          path: build/linux-packages/SHA256SUMS*
+          if-no-files-found: ignore
 
   windows:
     runs-on: windows-2022
@@ -115,18 +144,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { image: 'ubuntu:22.04',        package: 'record-labs_*_amd64.deb' }
-          - { image: 'ubuntu:24.04',        package: 'record-labs_*_amd64.deb' }
-          - { image: 'debian:12',           package: 'record-labs_*_amd64.deb' }
-          - { image: 'fedora:42',           package: 'record-labs-*.x86_64.rpm' }
-          - { image: 'opensuse/tumbleweed', package: 'record-labs-*.x86_64.rpm' }
-          - { image: 'opensuse/leap:15.6',  package: 'record-labs-*.x86_64.rpm' }
-          - { image: 'archlinux:latest',    package: 'record-labs-*-linux-x86_64.tar.xz' }
+          - { image: 'ubuntu:22.04',        artifact: linux-deb,  package: 'record-labs_*_amd64.deb' }
+          - { image: 'ubuntu:24.04',        artifact: linux-deb,  package: 'record-labs_*_amd64.deb' }
+          - { image: 'debian:12',           artifact: linux-deb,  package: 'record-labs_*_amd64.deb' }
+          - { image: 'fedora:42',           artifact: linux-rpm,  package: 'record-labs-*.x86_64.rpm' }
+          - { image: 'opensuse/tumbleweed', artifact: linux-rpm,  package: 'record-labs-*.x86_64.rpm' }
+          - { image: 'opensuse/leap:15.6',  artifact: linux-rpm,  package: 'record-labs-*.x86_64.rpm' }
+          - { image: 'archlinux:latest',    artifact: linux-arch, package: 'record-labs-*-linux-x86_64.tar.xz' }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
-          name: linux-packages
+          name: ${{ matrix.artifact }}
           path: packages
       - name: Install and run in ${{ matrix.image }}
         run: packaging/linux/test-install.sh "${{ matrix.image }}" packages/${{ matrix.package }} --gui
@@ -138,14 +167,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Every installer (linux-* and windows-installer) into one folder.
       - uses: actions/download-artifact@v4
         with:
-          name: linux-packages
           path: packages
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-installer
-          path: packages
+          merge-multiple: true
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
