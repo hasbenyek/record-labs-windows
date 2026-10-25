@@ -51,7 +51,75 @@ internal object LinuxX11Window {
     /** Asks the window manager to add or remove fullscreen. False if X11 is not usable. */
     fun requestFullscreen(window: java.awt.Window, enabled: Boolean): Boolean = withDisplay { display ->
         val x = x11 ?: return@withDisplay false
-        val client = clientWindow(display, window) ?: return@withDisplay false
+        sendToWindowManager(
+            display, window, "_NET_WM_STATE",
+            if (enabled) 1L else 0L, // _NET_WM_STATE_ADD / _REMOVE
+            x.XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", false).toLong(),
+            0L,
+            1L, // request from a normal application
+            0L,
+        )
+    } ?: false
+
+    /** _NET_WM_MOVERESIZE directions. */
+    const val MOVE = 8L
+    const val SIZE_BOTTOM_RIGHT = 4L
+
+    /**
+     * Lets the window manager move (or resize) [window] with the pointer, as when
+     * dragging a title bar. Wayland desktops ignore an X11 app that sets its own
+     * window position, so a borderless window can only be dragged this way.
+     * Call while the left button is held down; [rootX]/[rootY] is the pointer on screen.
+     */
+    fun beginMoveResize(window: java.awt.Window, rootX: Int, rootY: Int, direction: Long): Boolean = withDisplay { display ->
+        val x = x11 ?: return@withDisplay false
+        // The pointer is still grabbed by AWT for the pressed button; the window
+        // manager can only take over the drag once that grab is released.
+        releaseAwtPointerGrab()
+        sendToWindowManager(display, window, "_NET_WM_MOVERESIZE", rootX.toLong(), rootY.toLong(), direction, 1L, 1L)
+    } ?: false
+
+    /**
+     * Releases AWT's pointer grab on its own X11 connection, under AWT's lock
+     * (Xlib connections are not thread-safe). Needs the JVM option
+     * --add-exports java.desktop/sun.awt=ALL-UNNAMED (and sun.awt.X11), which
+     * the Linux build sets; without it the drag still works on desktops that
+     * take the pointer over themselves (Wayland compositors through XWayland).
+     */
+    private fun releaseAwtPointerGrab() {
+        val display = awtDisplay() ?: return
+        val grabs = pointerGrabs ?: return
+        val toolkit = runCatching { Class.forName("sun.awt.SunToolkit") }.getOrNull() ?: return
+        val lock = runCatching { toolkit.getMethod("awtLock") }.getOrNull() ?: return
+        val unlock = runCatching { toolkit.getMethod("awtUnlock") }.getOrNull() ?: return
+        runCatching {
+            lock.invoke(null)
+            try {
+                grabs.XUngrabPointer(display, NativeLong(0))
+                grabs.XFlush(display)
+            } finally {
+                unlock.invoke(null)
+            }
+        }
+    }
+
+    /** AWT's own X11 connection (needed to release its pointer grab), when the JVM allows reaching it. */
+    private fun awtDisplay(): com.sun.jna.Pointer? = runCatching {
+        val toolkit = Class.forName("sun.awt.X11.XToolkit")
+        val address = toolkit.getMethod("getDisplay").invoke(null) as Long
+        if (address == 0L) null else com.sun.jna.Pointer(address)
+    }.getOrNull()
+
+    /** The Xlib calls JNA's X11 mapping lacks. */
+    private interface PointerGrabs : com.sun.jna.Library {
+        fun XUngrabPointer(display: com.sun.jna.Pointer, time: NativeLong): Int
+        fun XFlush(display: com.sun.jna.Pointer): Int
+    }
+    private val pointerGrabs: PointerGrabs? by lazy { runCatching { Native.load("X11", PointerGrabs::class.java) }.getOrNull() }
+
+    private fun sendToWindowManager(display: X11.Display, window: java.awt.Window, messageType: String, vararg data: Long): Boolean {
+        val x = x11 ?: return false
+        val client = clientWindow(display, window) ?: return false
         val event = X11.XEvent()
         event.type = X11.ClientMessage
         event.setType(X11.XClientMessageEvent::class.java)
@@ -60,22 +128,18 @@ internal object LinuxX11Window {
         event.xclient.send_event = 1
         event.xclient.display = display
         event.xclient.window = client
-        event.xclient.message_type = x.XInternAtom(display, "_NET_WM_STATE", false)
+        event.xclient.message_type = x.XInternAtom(display, messageType, false)
         event.xclient.format = 32
         event.xclient.data.setType(Array<NativeLong>::class.java)
-        event.xclient.data.l[0] = NativeLong(if (enabled) 1L else 0L) // _NET_WM_STATE_ADD / _REMOVE
-        event.xclient.data.l[1] = NativeLong(x.XInternAtom(display, "_NET_WM_STATE_FULLSCREEN", false).toLong())
-        event.xclient.data.l[2] = NativeLong(0)
-        event.xclient.data.l[3] = NativeLong(1) // request from a normal application
-        event.xclient.data.l[4] = NativeLong(0)
+        for (index in 0 until 5) event.xclient.data.l[index] = NativeLong(data.getOrElse(index) { 0L })
         event.xclient.write()
         val sent = x.XSendEvent(
             display, x.XDefaultRootWindow(display), 0,
             NativeLong((X11.SubstructureRedirectMask or X11.SubstructureNotifyMask).toLong()), event,
         )
         x.XFlush(display)
-        sent != 0
-    } ?: false
+        return sent != 0
+    }
 
     /**
      * The X11 window the window manager manages for [window]: AWT reports an

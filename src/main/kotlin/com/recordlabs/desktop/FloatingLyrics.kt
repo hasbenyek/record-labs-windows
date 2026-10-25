@@ -11,6 +11,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.positionChange
+import androidx.compose.foundation.gestures.drag
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -310,15 +314,6 @@ fun FloatingLyricsWindow(
         }
     }
 
-    // Linux: this window is drawn by Skiko's software renderer. Its OpenGL
-    // renderer can't give a Linux window a see-through background, so the
-    // floating lyrics showed up opaque instead of over the desktop like on
-    // Windows. Skiko reads the setting when the window is created (below, in
-    // this composition), so it is set just around that and the main window
-    // keeps OpenGL.
-    val linuxSoftwareRendering = !com.recordlabs.desktop.data.Platform.isWindows
-    val previousRenderApi = if (linuxSoftwareRendering) System.getProperty("skiko.renderApi") else null
-    if (linuxSoftwareRendering) System.setProperty("skiko.renderApi", "SOFTWARE")
     Window(
         onCloseRequest = onClose,
         state = windowState,
@@ -340,10 +335,6 @@ fun FloatingLyricsWindow(
         focusable = com.recordlabs.desktop.data.Platform.isWindows,
     ) {
         FloatingLyricsWindowBody(track, windowState, initialWidth, initialHeight, onClose)
-    }
-    if (linuxSoftwareRendering) {
-        if (previousRenderApi == null) System.clearProperty("skiko.renderApi")
-        else System.setProperty("skiko.renderApi", previousRenderApi)
     }
 }
 
@@ -452,6 +443,54 @@ private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody
         PipResizeHandle(window, Modifier.align(Alignment.BottomEnd))
     }
     }
+}
+
+/**
+ * How the floating lyrics window looks. On COSMIC the desktop draws every X11
+ * app's see-through areas black (cosmic-comp issue #677), and Java apps are
+ * X11 apps there, so the lyrics get a solid dark card with square corners
+ * instead of floating over the desktop. Elsewhere it stays see-through.
+ */
+private object PipLook {
+    val opaque: Boolean = !com.recordlabs.desktop.data.Platform.isWindows &&
+        listOf("XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION")
+            .any { System.getenv(it).orEmpty().contains("cosmic", ignoreCase = true) }
+    val opaqueBackground = Color(0xFF121214)
+    val shape = if (opaque) androidx.compose.foundation.shape.RoundedCornerShape(0.dp) else RoundedCornerShape(16.dp)
+}
+
+/**
+ * The strip that moves the window. Windows moves it itself; on Linux the
+ * window manager is asked to (Wayland desktops ignore an X11 app that sets
+ * its own window position, so the old way did nothing there).
+ */
+@Composable
+private fun androidx.compose.ui.window.WindowScope.PipDragArea(modifier: Modifier, content: @Composable () -> Unit) {
+    if (com.recordlabs.desktop.data.Platform.isWindows) {
+        WindowDraggableArea(modifier) { content() }
+        return
+    }
+    Box(
+        modifier.pointerInput(window) {
+            awaitEachGesture {
+                val down = awaitFirstDown(requireUnconsumed = false)
+                val pointer = java.awt.MouseInfo.getPointerInfo()?.location
+                val scale = window.graphicsConfiguration?.defaultTransform?.scaleX ?: 1.0
+                val handedOver = pointer != null && LinuxX11Window.beginMoveResize(
+                    window, (pointer.x * scale).roundToInt(), (pointer.y * scale).roundToInt(), LinuxX11Window.MOVE,
+                )
+                if (handedOver) return@awaitEachGesture
+                // No window manager answer possible (no X11): move it ourselves.
+                val start = window.location
+                var offset = androidx.compose.ui.geometry.Offset.Zero
+                drag(down.id) { change ->
+                    offset += change.positionChange()
+                    change.consume()
+                    window.setLocation(start.x + (offset.x / density).roundToInt(), start.y + (offset.y / density).roundToInt())
+                }
+            }
+        },
+    ) { content() }
 }
 
 private const val PIP_MIN_WIDTH = 360f
@@ -592,13 +631,17 @@ fun WindowScope.FloatingLyricsContent(
         modifier = Modifier
             .fillMaxSize()
             .hoverable(interactionSource)
-            .clip(RoundedCornerShape(16.dp))
+            .clip(PipLook.shape)
             .background(
-                if (isHovered) Color.Black.copy(alpha = 0.45f) else Color.Transparent
+                when {
+                    PipLook.opaque -> PipLook.opaqueBackground
+                    isHovered -> Color.Black.copy(alpha = 0.45f)
+                    else -> Color.Transparent
+                }
             )
             .then(
                 if (isHovered) {
-                    Modifier.border(1.dp, Color.White.copy(alpha = 0.15f), RoundedCornerShape(16.dp))
+                    Modifier.border(1.dp, Color.White.copy(alpha = 0.15f), PipLook.shape)
                 } else Modifier
             )
             .onPointerEvent(PointerEventType.Scroll) { event ->
@@ -613,7 +656,7 @@ fun WindowScope.FloatingLyricsContent(
             },
     ) {
         // Dedicated draggable strip across top of window so user can reposition the window freely
-        WindowDraggableArea(
+        PipDragArea(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(34.dp)
@@ -821,7 +864,7 @@ fun WindowScope.FloatingLyricsContent(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                WindowDraggableArea(
+                PipDragArea(
                     modifier = Modifier.weight(1f).fillMaxHeight(),
                 ) {
                     Row(

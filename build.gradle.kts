@@ -136,6 +136,9 @@ compose.desktop {
     application {
         mainClass = "com.recordlabs.desktop.MainKt"
         jvmArgs("-Djava.library.path=src/appResources/$nativeResourceDir")
+        // Linux: dragging the borderless floating lyrics window hands the pointer
+        // to the window manager, which needs AWT's X11 connection (LinuxX11Window).
+        if (!isWindowsHost) jvmArgs("--add-exports=java.desktop/sun.awt=ALL-UNNAMED", "--add-exports=java.desktop/sun.awt.X11=ALL-UNNAMED")
         // Memory: a ceiling for the Java heap and a collector that hands unused
         // memory back to Windows (periodic GC while idle, smaller free margin).
         jvmArgs(
