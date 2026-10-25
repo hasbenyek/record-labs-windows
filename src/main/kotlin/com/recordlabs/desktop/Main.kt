@@ -8517,7 +8517,7 @@ private fun LyricsPage(
         value = WindowsLyricsTranslator.translate(texts, translationTarget).orEmpty()
     }
     // Positive offset delays the lyric; negative offset advances it.
-    val lyricsPositionMs = (positionMs - lyricsOffsetMs).coerceAtLeast(0L)
+    val lyricsPositionMs = (positionMs - lyricsOffsetMs + LyricsTiming.platformLeadMs).coerceAtLeast(0L)
     val currentGroupIndex = remember(lyricGroups, lyricsPositionMs) {
         if (lyricGroups.isEmpty()) -1
         else {

@@ -10,6 +10,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.hoverable
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -73,6 +74,7 @@ import androidx.compose.ui.text.TextLayoutResult
 import com.recordlabs.desktop.data.RichLyricLine
 import androidx.compose.ui.input.pointer.PointerEventType
 import androidx.compose.ui.input.pointer.onPointerEvent
+import androidx.compose.ui.input.pointer.pointerHoverIcon
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
@@ -269,7 +271,12 @@ fun FloatingLyricsWindow(
 ) {
     val track = FloatingLyricsState.currentTrack ?: return
     val savedPos = remember { WindowsPreferences.floatingLyricsPosition() }
-    val savedSize = remember { WindowsPreferences.floatingLyricsSize() }
+    // A size below the minimum (a window manager squeezed the window once and
+    // it was saved) opened the lyrics as a thin line: start over at the default.
+    val savedSize = remember {
+        WindowsPreferences.floatingLyricsSize()
+            ?.takeIf { it.first >= PIP_MIN_WIDTH && it.second >= PIP_MIN_HEIGHT }
+    }
 
     val initialWidth = savedSize?.first?.dp ?: 720.dp
     val initialHeight = savedSize?.second?.dp ?: 175.dp
@@ -298,7 +305,9 @@ fun FloatingLyricsWindow(
         val pos = windowState.position
         val size = windowState.size
         WindowsPreferences.saveFloatingLyricsPosition(pos.x.value, pos.y.value)
-        WindowsPreferences.saveFloatingLyricsSize(size.width.value, size.height.value)
+        if (size.width.value >= PIP_MIN_WIDTH && size.height.value >= PIP_MIN_HEIGHT) {
+            WindowsPreferences.saveFloatingLyricsSize(size.width.value, size.height.value)
+        }
     }
 
     Window(
@@ -310,74 +319,168 @@ fun FloatingLyricsWindow(
         undecorated = true,
         transparent = true,
         alwaysOnTop = true,
-        resizable = true,
+        // Linux: a fixed-size window to the window manager (it is resized with
+        // its own handle instead). Tiling window managers float fixed-size
+        // windows rather than squeezing them into a tile, which had left the
+        // lyrics as a thin, unusable strip.
+        resizable = com.recordlabs.desktop.data.Platform.isWindows,
         // Linux window managers give keyboard focus to every window that appears,
         // so the lyrics window took focus away from the app the user had just
         // switched to (on Windows a topmost window shown this way does not).
         // Its buttons, dragging and scrolling still work without focus.
         focusable = com.recordlabs.desktop.data.Platform.isWindows,
     ) {
-        // Multi-monitor dynamic watcher: catches monitor plug/unplug & resolution/topology changes
-        LaunchedEffect(window) {
-            var lastSignature = getScreenTopologySignature()
-            while (isActive) {
-                delay(1000L)
-                val currentSignature = getScreenTopologySignature()
-                if (currentSignature != lastSignature) {
-                    lastSignature = currentSignature
-                    if (!FloatingLyricsState.isPipMinimized) {
-                        recoverFloatingWindow(window, windowState)
-                        // Second pass after 800ms when Windows finishes display handshake and DWM settles
-                        delay(800L)
-                        recoverFloatingWindow(window, windowState)
+        FloatingLyricsWindowBody(track, windowState, initialWidth, initialHeight, onClose)
+    }
+}
+
+@Composable
+private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody(
+    track: Track,
+    windowState: androidx.compose.ui.window.WindowState,
+    initialWidth: androidx.compose.ui.unit.Dp,
+    initialHeight: androidx.compose.ui.unit.Dp,
+    onClose: () -> Unit,
+) {
+    DisposableEffect(window) {
+        window.minimumSize = java.awt.Dimension(PIP_MIN_WIDTH.toInt(), PIP_MIN_HEIGHT.toInt())
+        // Window managers that ignore the minimum size: grow it back right away.
+        val keepMinimum = object : ComponentAdapter() {
+            override fun componentResized(e: ComponentEvent?) {
+                if (window.isVisible && (window.width < PIP_MIN_WIDTH || window.height < PIP_MIN_HEIGHT)) {
+                    java.awt.EventQueue.invokeLater {
+                        window.setSize(maxOf(window.width, PIP_MIN_WIDTH.toInt()), maxOf(window.height, PIP_MIN_HEIGHT.toInt()))
                     }
                 }
             }
         }
-
-        // Recover window position, topmost Z-order, and Skiko rendering surface when shown / unminimized
-        LaunchedEffect(window, FloatingLyricsState.isPipMinimized) {
-            if (!FloatingLyricsState.isPipMinimized) {
-                recoverFloatingWindow(window, windowState)
+        window.addComponentListener(keepMinimum)
+        onDispose { window.removeComponentListener(keepMinimum) }
+    }
+    // Grown back to the minimum if the window manager shrank it anyway.
+    LaunchedEffect(window, FloatingLyricsState.isPipMinimized) {
+        if (FloatingLyricsState.isPipMinimized) return@LaunchedEffect
+        repeat(3) {
+            delay(400L)
+            if (window.width < PIP_MIN_WIDTH || window.height < PIP_MIN_HEIGHT) {
+                window.setSize(
+                    maxOf(window.width, initialWidth.value.roundToInt(), PIP_MIN_WIDTH.toInt()),
+                    maxOf(window.height, initialHeight.value.roundToInt(), PIP_MIN_HEIGHT.toInt()),
+                )
             }
         }
+    }
+    // Multi-monitor dynamic watcher: catches monitor plug/unplug & resolution/topology changes
+    LaunchedEffect(window) {
+        var lastSignature = getScreenTopologySignature()
+        while (isActive) {
+            delay(1000L)
+            val currentSignature = getScreenTopologySignature()
+            if (currentSignature != lastSignature) {
+                lastSignature = currentSignature
+                if (!FloatingLyricsState.isPipMinimized) {
+                    recoverFloatingWindow(window, windowState)
+                    // Second pass after 800ms when Windows finishes display handshake and DWM settles
+                    delay(800L)
+                    recoverFloatingWindow(window, windowState)
+                }
+            }
+        }
+    }
 
-        // Keep transparency alive when dragged across displays with different scaling factors
-        DisposableEffect(window) {
-            var lastGc = window.graphicsConfiguration
-            val listener = object : ComponentAdapter() {
-                override fun componentMoved(e: ComponentEvent?) {
-                    val currentGc = window.graphicsConfiguration
-                    if (lastGc != null && currentGc != null && lastGc !== currentGc) {
-                        lastGc = currentGc
-                        runCatching {
-                            window.background = java.awt.Color(0, 0, 0, 0)
-                            window.revalidate()
-                            window.repaint()
-                        }
+    // Recover window position, topmost Z-order, and Skiko rendering surface when shown / unminimized
+    LaunchedEffect(window, FloatingLyricsState.isPipMinimized) {
+        if (!FloatingLyricsState.isPipMinimized) {
+            recoverFloatingWindow(window, windowState)
+        }
+    }
+
+    // Keep transparency alive when dragged across displays with different scaling factors
+    DisposableEffect(window) {
+        var lastGc = window.graphicsConfiguration
+        val listener = object : ComponentAdapter() {
+            override fun componentMoved(e: ComponentEvent?) {
+                val currentGc = window.graphicsConfiguration
+                if (lastGc != null && currentGc != null && lastGc !== currentGc) {
+                    lastGc = currentGc
+                    runCatching {
+                        window.background = java.awt.Color(0, 0, 0, 0)
+                        window.revalidate()
+                        window.repaint()
                     }
                 }
             }
-            window.addComponentListener(listener)
-            onDispose {
-                window.removeComponentListener(listener)
-            }
         }
+        window.addComponentListener(listener)
+        onDispose {
+            window.removeComponentListener(listener)
+        }
+    }
 
-        FloatingLyricsContent(
-            track = track,
-            isPlaying = FloatingLyricsState.isPlaying,
-            positionMs = FloatingLyricsState.positionMs,
-            onPlayPause = { FloatingLyricsState.onPlayPause?.invoke() },
-            onPrevious = { FloatingLyricsState.onPrevious?.invoke() },
-            onNext = { FloatingLyricsState.onNext?.invoke() },
-            onSeek = { pos -> FloatingLyricsState.onSeek?.invoke(pos) },
-            onOpenDesktop = {
-                FloatingLyricsState.isPipMinimized = true
-                FloatingLyricsState.requestRestoreDesktop?.invoke()
+    Box(Modifier.fillMaxSize()) {
+    FloatingLyricsContent(
+        track = track,
+        isPlaying = FloatingLyricsState.isPlaying,
+        // Same timing as the lyrics page: the Lyrics offset setting and the Linux lead.
+        positionMs = LyricsTiming.position(FloatingLyricsState.positionMs),
+        onPlayPause = { FloatingLyricsState.onPlayPause?.invoke() },
+        onPrevious = { FloatingLyricsState.onPrevious?.invoke() },
+        onNext = { FloatingLyricsState.onNext?.invoke() },
+        onSeek = { pos -> FloatingLyricsState.onSeek?.invoke(pos) },
+        onOpenDesktop = {
+            FloatingLyricsState.isPipMinimized = true
+            FloatingLyricsState.requestRestoreDesktop?.invoke()
+        },
+        onClose = onClose,
+    )
+    // Linux window managers can't resize a borderless window, so it gets
+    // its own handle (bottom-right corner). Windows resizes it natively.
+    if (!com.recordlabs.desktop.data.Platform.isWindows) {
+        PipResizeHandle(window, Modifier.align(Alignment.BottomEnd))
+    }
+    }
+}
+
+private const val PIP_MIN_WIDTH = 360f
+private const val PIP_MIN_HEIGHT = 120f
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun PipResizeHandle(window: java.awt.Window, modifier: Modifier) {
+    val density = LocalDensity.current.density
+    var hovered by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            .size(28.dp)
+            .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon(java.awt.Cursor(java.awt.Cursor.SE_RESIZE_CURSOR)))
+            .onPointerEvent(PointerEventType.Enter) { hovered = true }
+            .onPointerEvent(PointerEventType.Exit) { hovered = false }
+            .pointerInput(window) {
+                var width = 0f
+                var height = 0f
+                detectDragGestures(
+                    onDragStart = {
+                        width = window.width.toFloat()
+                        height = window.height.toFloat()
+                    },
+                ) { change, drag ->
+                    change.consume()
+                    // The corner moves with the pointer, so these deltas stay exact.
+                    width = (width + drag.x / density).coerceAtLeast(PIP_MIN_WIDTH)
+                    height = (height + drag.y / density).coerceAtLeast(PIP_MIN_HEIGHT)
+                    window.setSize(width.roundToInt(), height.roundToInt())
+                }
             },
-            onClose = onClose,
-        )
+        contentAlignment = Alignment.BottomEnd,
+    ) {
+        androidx.compose.foundation.Canvas(Modifier.padding(7.dp).size(12.dp)) {
+            val color = Color.White.copy(alpha = if (hovered) 0.85f else 0.35f)
+            val stroke = 1.6.dp.toPx()
+            for (step in 1..3) {
+                val inset = size.width * (1f - step / 3f)
+                drawLine(color, Offset(size.width, inset), Offset(inset, size.height), stroke, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+            }
+        }
     }
 }
 
