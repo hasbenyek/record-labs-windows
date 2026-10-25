@@ -89,6 +89,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Window
@@ -299,6 +300,29 @@ fun FloatingLyricsWindow(
         }
     }
 
+    if (LinuxLyricsOverlay.isAvailable) {
+        // Wayland desktop with the layer shell: a native, see-through overlay.
+        val currentOnClose by androidx.compose.runtime.rememberUpdatedState(onClose)
+        DisposableEffect(Unit) {
+            LinuxLyricsOverlay.onGeometryChanged = { x, y, w, h ->
+                WindowsPreferences.saveFloatingLyricsPosition(x.toFloat(), y.toFloat())
+                WindowsPreferences.saveFloatingLyricsSize(w.toFloat(), h.toFloat())
+            }
+            LinuxLyricsOverlay.start(
+                content = { OverlayLyrics(onClose = { currentOnClose() }) },
+                x = savedPos?.first?.roundToInt() ?: -1,
+                y = savedPos?.second?.roundToInt() ?: -1,
+                width = initialWidth.value.roundToInt(),
+                height = initialHeight.value.roundToInt(),
+            )
+            onDispose { LinuxLyricsOverlay.stop() }
+        }
+        LaunchedEffect(FloatingLyricsState.isPipMinimized) {
+            LinuxLyricsOverlay.setVisible(!FloatingLyricsState.isPipMinimized)
+        }
+        return
+    }
+
     val windowState = rememberWindowState(
         position = initialPos,
         width = initialWidth,
@@ -421,6 +445,7 @@ private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody
         }
     }
 
+    androidx.compose.runtime.CompositionLocalProvider(LocalPipWindowScope provides this) {
     Box(Modifier.fillMaxSize()) {
     FloatingLyricsContent(
         track = track,
@@ -440,8 +465,42 @@ private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody
     // Linux window managers can't resize a borderless window, so it gets
     // its own handle (bottom-right corner). Windows resizes it natively.
     if (!com.recordlabs.desktop.data.Platform.isWindows) {
-        PipResizeHandle(window, Modifier.align(Alignment.BottomEnd))
+        PipResizeHandle(Modifier.align(Alignment.BottomEnd))
     }
+    }
+    }
+}
+
+private val LocalPipWindowScope = androidx.compose.runtime.staticCompositionLocalOf<androidx.compose.ui.window.WindowScope?> { null }
+private val LocalPipOverlay = androidx.compose.runtime.staticCompositionLocalOf { false }
+
+/** Runs a button's action on the AWT thread (the overlay draws on its own thread). */
+private fun onAwt(action: () -> Unit) = java.awt.EventQueue.invokeLater(action)
+
+/** The floating lyrics inside the Wayland overlay (see LinuxLyricsOverlay). */
+@Composable
+private fun OverlayLyrics(onClose: () -> Unit) {
+    val track = FloatingLyricsState.currentTrack ?: return
+    androidx.compose.runtime.CompositionLocalProvider(LocalPipOverlay provides true) {
+        Box(Modifier.fillMaxSize()) {
+            FloatingLyricsContent(
+                track = track,
+                isPlaying = FloatingLyricsState.isPlaying,
+                positionMs = LyricsTiming.position(FloatingLyricsState.positionMs),
+                onPlayPause = { onAwt { FloatingLyricsState.onPlayPause?.invoke() } },
+                onPrevious = { onAwt { FloatingLyricsState.onPrevious?.invoke() } },
+                onNext = { onAwt { FloatingLyricsState.onNext?.invoke() } },
+                onSeek = { pos -> onAwt { FloatingLyricsState.onSeek?.invoke(pos) } },
+                onOpenDesktop = {
+                    onAwt {
+                        FloatingLyricsState.isPipMinimized = true
+                        FloatingLyricsState.requestRestoreDesktop?.invoke()
+                    }
+                },
+                onClose = { onAwt(onClose) },
+            )
+            PipResizeHandle(Modifier.align(Alignment.BottomEnd))
+        }
     }
 }
 
@@ -452,7 +511,7 @@ private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody
  * instead of floating over the desktop. Elsewhere it stays see-through.
  */
 private object PipLook {
-    val opaque: Boolean = !com.recordlabs.desktop.data.Platform.isWindows &&
+    val opaque: Boolean = !com.recordlabs.desktop.data.Platform.isWindows && !LinuxLyricsOverlay.isAvailable &&
         listOf("XDG_CURRENT_DESKTOP", "XDG_SESSION_DESKTOP", "DESKTOP_SESSION")
             .any { System.getenv(it).orEmpty().contains("cosmic", ignoreCase = true) }
     val opaqueBackground = Color(0xFF121214)
@@ -465,11 +524,23 @@ private object PipLook {
  * its own window position, so the old way did nothing there).
  */
 @Composable
-private fun androidx.compose.ui.window.WindowScope.PipDragArea(modifier: Modifier, content: @Composable () -> Unit) {
-    if (com.recordlabs.desktop.data.Platform.isWindows) {
-        WindowDraggableArea(modifier) { content() }
+private fun PipDragArea(modifier: Modifier, content: @Composable () -> Unit) {
+    if (LocalPipOverlay.current) {
+        // Wayland overlay: it follows the pointer itself until the button is released.
+        Box(modifier.pointerInput(Unit) {
+            awaitEachGesture {
+                awaitFirstDown(requireUnconsumed = false)
+                LinuxLyricsOverlay.beginDrag()
+            }
+        }) { content() }
         return
     }
+    val scope = LocalPipWindowScope.current ?: run { Box(modifier) { content() }; return }
+    if (com.recordlabs.desktop.data.Platform.isWindows) {
+        with(scope) { WindowDraggableArea(modifier) { content() } }
+        return
+    }
+    val window = scope.window
     Box(
         modifier.pointerInput(window) {
             awaitEachGesture {
@@ -498,16 +569,24 @@ private const val PIP_MIN_HEIGHT = 120f
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-private fun PipResizeHandle(window: java.awt.Window, modifier: Modifier) {
+private fun PipResizeHandle(modifier: Modifier) {
     val density = LocalDensity.current.density
     var hovered by remember { mutableStateOf(false) }
+    val overlay = LocalPipOverlay.current
+    val window = LocalPipWindowScope.current?.window
     Box(
         modifier
             .size(28.dp)
-            .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon(java.awt.Cursor(java.awt.Cursor.SE_RESIZE_CURSOR)))
+            .then(if (overlay) Modifier else Modifier.pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon(java.awt.Cursor(java.awt.Cursor.SE_RESIZE_CURSOR))))
             .onPointerEvent(PointerEventType.Enter) { hovered = true }
             .onPointerEvent(PointerEventType.Exit) { hovered = false }
-            .pointerInput(window) {
+            .then(if (overlay) Modifier.pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false).consume()
+                    LinuxLyricsOverlay.beginResize()
+                }
+            } else Modifier)
+            .then(if (overlay || window == null) Modifier else Modifier.pointerInput(window) {
                 var width = 0f
                 var height = 0f
                 detectDragGestures(
@@ -522,7 +601,7 @@ private fun PipResizeHandle(window: java.awt.Window, modifier: Modifier) {
                     height = (height + drag.y / density).coerceAtLeast(PIP_MIN_HEIGHT)
                     window.setSize(width.roundToInt(), height.roundToInt())
                 }
-            },
+            }),
         contentAlignment = Alignment.BottomEnd,
     ) {
         androidx.compose.foundation.Canvas(Modifier.padding(7.dp).size(12.dp)) {
@@ -538,7 +617,7 @@ private fun PipResizeHandle(window: java.awt.Window, modifier: Modifier) {
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-fun WindowScope.FloatingLyricsContent(
+fun FloatingLyricsContent(
     track: Track,
     isPlaying: Boolean,
     positionMs: Long,
@@ -815,9 +894,9 @@ fun WindowScope.FloatingLyricsContent(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .offset { IntOffset(0, relY.roundToInt()) }
-                                .graphicsLayer {
-                                    alpha = animatedAlpha
-                                }
+                                // Linux fades the cached line image itself (LocalPipLineAlpha): a
+                                // fading layer here cut the dimmed lines' shadows into hard bands.
+                                .then(if (com.recordlabs.desktop.data.Platform.isWindows) Modifier.graphicsLayer { alpha = animatedAlpha } else Modifier)
                                 .onSizeChanged { itemHeights[index] = it.height }
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
@@ -830,6 +909,7 @@ fun WindowScope.FloatingLyricsContent(
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
+                            androidx.compose.runtime.CompositionLocalProvider(LocalPipLineAlpha provides animatedAlpha) {
                             NetflixSubtitleKaraokeLine(
                                 line = vocalLines[index],
                                 isActive = isCenterLine,
@@ -841,6 +921,7 @@ fun WindowScope.FloatingLyricsContent(
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.fillMaxWidth(0.92f),
                             )
+                            }
                         }
                     }
                 }
@@ -1010,76 +1091,135 @@ fun NetflixSubtitleText(
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        // Layer 1: Extra wide ambient diffuse halo
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = text,
-            fontSize = fontSize,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = Color.Black.copy(alpha = 0.95f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.95f),
-                    offset = Offset(0f, 2.5f),
-                    blurRadius = 22f,
+        if (!com.recordlabs.desktop.data.Platform.isWindows) {
+            CachedShadowText(text, fontSize, TextUnit.Unspecified, fontWeight, textColor.copy(alpha = alpha), fillWidth = false)
+        } else {
+            // Layer 1: Extra wide ambient diffuse halo
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = text,
+                fontSize = fontSize,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = Color.Black.copy(alpha = 0.95f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.95f),
+                        offset = Offset(0f, 2.5f),
+                        blurRadius = 22f,
+                    ),
                 ),
-            ),
-        )
-        // Layer 2: Medium ambient spreading shadow
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = text,
-            fontSize = fontSize,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = Color.Black.copy(alpha = 0.92f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.92f),
-                    offset = Offset(0f, 1.5f),
-                    blurRadius = 12f,
+            )
+            // Layer 2: Medium ambient spreading shadow
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = text,
+                fontSize = fontSize,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = Color.Black.copy(alpha = 0.92f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.92f),
+                        offset = Offset(0f, 1.5f),
+                        blurRadius = 12f,
+                    ),
                 ),
-            ),
-        )
-        // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = text,
-            fontSize = fontSize,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = Color.Black.copy(alpha = 0.90f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.90f),
-                    offset = Offset(0f, 0f),
-                    blurRadius = 4f,
+            )
+            // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = text,
+                fontSize = fontSize,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = Color.Black.copy(alpha = 0.90f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.90f),
+                        offset = Offset(0f, 0f),
+                        blurRadius = 4f,
+                    ),
                 ),
-            ),
-        )
-        // Layer 4: Foreground crisp white text
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = text,
-            fontSize = fontSize,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = textColor.copy(alpha = alpha),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.85f),
-                    offset = Offset(0f, 1f),
-                    blurRadius = 2f,
+            )
+            // Layer 4: Foreground crisp white text
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = text,
+                fontSize = fontSize,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = textColor.copy(alpha = alpha),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.85f),
+                        offset = Offset(0f, 1f),
+                        blurRadius = 2f,
+                    ),
                 ),
-            ),
-        )
+            )
+        }
     }
 }
+
+/**
+ * The lyric shadow layers (wide halo, soft shadow, contour, base text) drawn
+ * once into a bitmap and then only copied. Each layer is a blurred text draw;
+ * redrawing all four every frame made the floating lyrics stutter on Linux.
+ */
+@Composable
+private fun CachedShadowText(
+    text: String,
+    fontSize: TextUnit,
+    lineHeight: TextUnit,
+    fontWeight: FontWeight,
+    color: Color,
+    fillWidth: Boolean,
+) {
+    val measurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 8)
+    val density = LocalDensity.current
+    BoxWithConstraints(if (fillWidth) Modifier.fillMaxWidth() else Modifier) {
+        val maxWidth = constraints.maxWidth
+        val layout = remember(text, fontSize, lineHeight, fontWeight, maxWidth, density) {
+            measurer.measure(
+                text = androidx.compose.ui.text.AnnotatedString(text),
+                style = TextStyle(fontFamily = AppFonts.lyrics, fontSize = fontSize, lineHeight = lineHeight, fontWeight = fontWeight, textAlign = TextAlign.Center),
+                constraints = if (fillWidth) androidx.compose.ui.unit.Constraints.fixedWidth(maxWidth) else androidx.compose.ui.unit.Constraints(maxWidth = maxWidth),
+                density = density,
+            )
+        }
+        val bitmap = remember(layout, color) {
+            val pad = SHADOW_PAD
+            val image = androidx.compose.ui.graphics.ImageBitmap(layout.size.width + 2 * pad, layout.size.height + 2 * pad)
+            androidx.compose.ui.graphics.drawscope.CanvasDrawScope().draw(
+                density, androidx.compose.ui.unit.LayoutDirection.Ltr, androidx.compose.ui.graphics.Canvas(image),
+                Size(image.width.toFloat(), image.height.toFloat()),
+            ) {
+                val at = Offset(pad.toFloat(), pad.toFloat())
+                drawText(layout, color = Color.Black.copy(alpha = 0.95f), topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.95f), Offset(0f, 2.5f), 22f))
+                drawText(layout, color = Color.Black.copy(alpha = 0.92f), topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.92f), Offset(0f, 1.5f), 12f))
+                drawText(layout, color = Color.Black.copy(alpha = 0.90f), topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.90f), Offset.Zero, 4f))
+                drawText(layout, color = color, topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.85f), Offset(0f, 1f), 2f))
+            }
+            image
+        }
+        val lineAlpha = LocalPipLineAlpha.current
+        val widthDp = with(density) { layout.size.width.toDp() }
+        val heightDp = with(density) { layout.size.height.toDp() }
+        androidx.compose.foundation.Canvas(Modifier.size(widthDp, heightDp)) {
+            drawImage(bitmap, topLeft = Offset(-SHADOW_PAD.toFloat(), -SHADOW_PAD.toFloat()), alpha = lineAlpha)
+        }
+    }
+}
+
+private const val SHADOW_PAD = 80
+
+/** Opacity of the lyric line being drawn (Linux draws it into the cached line image). */
+private val LocalPipLineAlpha = androidx.compose.runtime.compositionLocalOf { 1f }
 
 @Composable
 private fun smoothPlaybackClock(
@@ -1183,83 +1323,89 @@ fun NetflixSubtitleKaraokeLine(
     val baseTextColor = if (isActive) Color(0xFFB8B8B8) else Color(0xFFA0A0A0)
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        // Layer 1: Extra wide ambient diffuse halo
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = plain,
-            fontSize = fontSize,
-            lineHeight = lineHeight,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = Color.Black.copy(alpha = 0.95f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.95f),
-                    offset = Offset(0f, 2.5f),
-                    blurRadius = 22f,
+        if (!com.recordlabs.desktop.data.Platform.isWindows) {
+            // Linux: the four shadow layers drawn once into a bitmap (blurs are
+            // expensive without a GPU); only the sung highlight is drawn each frame.
+            CachedShadowText(plain, fontSize, lineHeight, fontWeight, baseTextColor, fillWidth = true)
+        } else {
+            // Layer 1: Extra wide ambient diffuse halo
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = plain,
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = Color.Black.copy(alpha = 0.95f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.95f),
+                        offset = Offset(0f, 2.5f),
+                        blurRadius = 22f,
+                    ),
                 ),
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        // Layer 2: Medium ambient spreading shadow
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = plain,
-            fontSize = fontSize,
-            lineHeight = lineHeight,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = Color.Black.copy(alpha = 0.92f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.92f),
-                    offset = Offset(0f, 1.5f),
-                    blurRadius = 12f,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // Layer 2: Medium ambient spreading shadow
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = plain,
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = Color.Black.copy(alpha = 0.92f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.92f),
+                        offset = Offset(0f, 1.5f),
+                        blurRadius = 12f,
+                    ),
                 ),
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = plain,
-            fontSize = fontSize,
-            lineHeight = lineHeight,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = Color.Black.copy(alpha = 0.90f),
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.90f),
-                    offset = Offset(0f, 0f),
-                    blurRadius = 4f,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = plain,
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = Color.Black.copy(alpha = 0.90f),
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.90f),
+                        offset = Offset(0f, 0f),
+                        blurRadius = 4f,
+                    ),
                 ),
-            ),
-            modifier = Modifier.fillMaxWidth(),
-        )
-        // Layer 4: Base foreground gray text
-        Text(
-            fontFamily = AppFonts.lyrics,
-            text = plain,
-            fontSize = fontSize,
-            lineHeight = lineHeight,
-            fontWeight = fontWeight,
-            textAlign = TextAlign.Center,
-            softWrap = true,
-            color = baseTextColor,
-            style = TextStyle(
-                shadow = Shadow(
-                    color = Color.Black.copy(alpha = 0.85f),
-                    offset = Offset(0f, 1f),
-                    blurRadius = 2f,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            // Layer 4: Base foreground gray text
+            Text(
+                fontFamily = AppFonts.lyrics,
+                text = plain,
+                fontSize = fontSize,
+                lineHeight = lineHeight,
+                fontWeight = fontWeight,
+                textAlign = TextAlign.Center,
+                softWrap = true,
+                color = baseTextColor,
+                style = TextStyle(
+                    shadow = Shadow(
+                        color = Color.Black.copy(alpha = 0.85f),
+                        offset = Offset(0f, 1f),
+                        blurRadius = 2f,
+                    ),
                 ),
-            ),
-            onTextLayout = { textLayoutResult = it },
-            modifier = Modifier.fillMaxWidth(),
-        )
+                onTextLayout = { textLayoutResult = it },
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
 
         // Layer 5: Active white highlight text (pure white, no glow/cahaya, smooth soft-edge wipe)
         if (isActive) {
@@ -1274,6 +1420,7 @@ fun NetflixSubtitleKaraokeLine(
                         textAlign = TextAlign.Center,
                         softWrap = true,
                         color = Color.White,
+                        onTextLayout = { if (!com.recordlabs.desktop.data.Platform.isWindows) textLayoutResult = it },
                         modifier = Modifier
                             .fillMaxWidth()
                             .drawWithContent {

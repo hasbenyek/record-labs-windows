@@ -45,6 +45,13 @@ Lirik (halaman lirik dan floating lyrics/PiP) memakai SF Pro Display kalau terpa
 tidak, Inter Display (gratis, mirip SF Pro, sudah termasuk di aplikasi).
 
 
+FLOATING LYRICS (PiP)
+---------------------
+Di desktop Wayland (COSMIC, KDE Plasma, sway, Hyprland) lirik melayang tampil sebagai overlay
+transparan di atas semua jendela, bisa digeser lewat strip atas dan diubah ukurannya lewat
+pojok kanan bawah. Di GNOME (dan sesi X11) memakai jendela biasa.
+
+
 TOMBOL MEDIA KEYBOARD
 ---------------------
 Play/pause, next, previous dan stop di keyboard bekerja lewat MPRIS (kontrol media standar

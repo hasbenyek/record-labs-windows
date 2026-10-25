@@ -68,9 +68,12 @@ internal class VlcPlayerBackend {
     }
 
     private fun createPlayer(pitch: Int) {
+        useSteadyAudioOutput()
         val args = mutableListOf(
             "--intf=dummy", "--no-video", "--no-osd", "--no-stats", "--quiet",
-            "--network-caching=1000", "--http-reconnect",
+            // A little more read-ahead before the first note, so a slow first
+            // second from the network no longer cuts out right after the start.
+            "--network-caching=1500", "--file-caching=500", "--http-reconnect",
             // Tempo changes keep the original pitch (like the Windows helper).
             "--audio-time-stretch",
         )
@@ -85,6 +88,18 @@ internal class VlcPlayerBackend {
         factory = newFactory
         player = newPlayer
         factoryPitch = pitch
+    }
+
+    /**
+     * Linux sound servers (PipeWire, PulseAudio) start VLC's stream with a very
+     * small buffer; the first second of a song then came out silent, then in
+     * bursts with a dropout before playing smoothly. A 60 ms buffer (still
+     * unnoticeable) avoids that. Read by the sound library when a stream opens;
+     * a value the user already set is kept.
+     */
+    private fun useSteadyAudioOutput() {
+        if (Platform.isWindows || !System.getenv("PULSE_LATENCY_MSEC").isNullOrBlank()) return
+        runCatching { uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv("PULSE_LATENCY_MSEC", "60", 0) }
     }
 
     private val events = object : MediaPlayerEventAdapter() {
