@@ -308,6 +308,11 @@ fun FloatingLyricsWindow(
                 WindowsPreferences.saveFloatingLyricsPosition(x.toFloat(), y.toFloat())
                 WindowsPreferences.saveFloatingLyricsSize(w.toFloat(), h.toFloat())
             }
+            // First time, the overlay opens on the screen showing the app.
+            LinuxLyricsOverlay.preferredPoint = {
+                java.awt.Frame.getFrames().firstOrNull { it.isShowing && it.title == "Record Labs" }
+                    ?.let { java.awt.Point(it.x + it.width / 2, it.y + it.height / 2) }
+            }
             LinuxLyricsOverlay.start(
                 content = { OverlayLyrics(onClose = { currentOnClose() }) },
                 x = savedPos?.first?.roundToInt() ?: -1,

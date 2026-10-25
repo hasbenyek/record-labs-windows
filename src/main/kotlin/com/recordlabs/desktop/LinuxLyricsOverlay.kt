@@ -42,14 +42,18 @@ internal object LinuxLyricsOverlay {
     /** True on a Wayland session whose compositor offers the layer shell. */
     val isAvailable: Boolean by lazy { !com.recordlabs.desktop.data.Platform.isWindows && runCatching { probe() }.getOrDefault(false) }
 
-    /** Position and size changed by the user (logical pixels): x, y, width, height. */
+    /** Position (desktop coordinates, all screens) and size changed by the user: x, y, width, height. */
     @Volatile var onGeometryChanged: ((Int, Int, Int, Int) -> Unit)? = null
+
+    /** A point on the screen the overlay should first appear on (the app window's centre), if known. */
+    @Volatile var preferredPoint: (() -> java.awt.Point?)? = null
 
     private val commands = ConcurrentLinkedQueue<() -> Unit>()
     @Volatile private var thread: Thread? = null
     @Volatile private var running = false
 
-    // Everything below is used only on the overlay thread.
+    // Everything below is used only on the overlay thread. x/y are desktop
+    // coordinates (logical pixels over all screens); margins are per screen.
     private var content: (@Composable () -> Unit)? = null
     private var visible = false
     private var x = 100
@@ -141,11 +145,34 @@ internal object LinuxLyricsOverlay {
         private var pointer: Pointer? = null
         private var layerShell: Pointer? = null
         private var xdgOutputManager: Pointer? = null
-        private var logicalSizeKnown = false
-        private val outputs = mutableListOf<Pointer>()
-        private var scale = 1
-        private var outputWidth = 0
-        private var outputHeight = 0
+
+        /** One screen: its scale and its place on the desktop in logical pixels. */
+        private inner class Output(val proxy: Pointer, val globalName: Int) {
+            var scale = 1
+            var pixelWidth = 0
+            var pixelHeight = 0
+            var geometryX = 0
+            var geometryY = 0
+            var logicalX = 0
+            var logicalY = 0
+            var logicalWidth = 0
+            var logicalHeight = 0
+            var logicalKnown = false
+            val left get() = if (logicalKnown) logicalX else geometryX
+            val top get() = if (logicalKnown) logicalY else geometryY
+            val width get() = if (logicalKnown) logicalWidth else pixelWidth / scale.coerceAtLeast(1)
+            val height get() = if (logicalKnown) logicalHeight else pixelHeight / scale.coerceAtLeast(1)
+            fun contains(px: Int, py: Int) = width > 0 && px >= left && py >= top && px < left + width && py < top + height
+        }
+        private val outputs = mutableListOf<Output>()
+        /** The screen the overlay is on (a layer surface lives on one screen). */
+        private var current: Output? = null
+        private val scale get() = current?.scale ?: 1
+        private val outputLeft get() = current?.left ?: 0
+        private val outputTop get() = current?.top ?: 0
+        private val outputWidth get() = current?.width ?: 0
+        private val outputHeight get() = current?.height ?: 0
+        private fun outputFor(proxy: Pointer?) = outputs.firstOrNull { it.proxy == proxy }
         private val keepAlive = mutableListOf<Any>()
 
         private var surface: Pointer? = null
@@ -216,23 +243,25 @@ internal object LinuxLyricsOverlay {
         private fun createSurface() {
             val compositor = compositor ?: return
             val layerShell = layerShell ?: return
+            val firstTime = x < 0 || y < 0
+            if (current == null || current !in outputs) current = chooseOutput(firstTime)
             val surface = wl.wl_proxy_marshal_flags(compositor, 0, Wl.iface("wl_surface_interface"), compositorVersion, 0, null) ?: return
             this.surface = surface
-            if (x < 0 || y < 0) {
+            if (firstTime) {
                 // First time: centred near the bottom of the screen, like on Windows.
-                x = ((outputWidth - width) / 2).coerceAtLeast(0)
-                y = (outputHeight - height - 80).coerceAtLeast(0)
+                x = outputLeft + ((outputWidth - width) / 2).coerceAtLeast(0)
+                y = outputTop + (outputHeight - height - 80).coerceAtLeast(0)
             }
             clampPosition()
             val layer = wl.wl_proxy_marshal_flags(
                 layerShell, 0, Wl.layerSurfaceInterface, 1, 0,
-                null, surface, null, LAYER_TOP, "record-labs-lyrics",
+                null, surface, current?.proxy, LAYER_TOP, "record-labs-lyrics",
             ) ?: return
             layerSurface = layer
             wl.wl_proxy_add_listener(layer, layerListener, null)
             wl.wl_proxy_marshal_flags(layer, 0, null, 1, 0, width, height) // set_size
             wl.wl_proxy_marshal_flags(layer, 1, null, 1, 0, ANCHOR_TOP or ANCHOR_LEFT) // set_anchor
-            wl.wl_proxy_marshal_flags(layer, 3, null, 1, 0, y, 0, 0, x) // set_margin
+            wl.wl_proxy_marshal_flags(layer, 3, null, 1, 0, y - outputTop, 0, 0, x - outputLeft) // set_margin (per screen)
             wl.wl_proxy_marshal_flags(layer, 4, null, 1, 0, 0) // no keyboard focus
             if (compositorVersion >= 3) wl.wl_proxy_marshal_flags(surface, 8, null, compositorVersion, 0, scale) // set_buffer_scale
             wl.wl_proxy_marshal_flags(surface, 6, null, compositorVersion, 0) // commit
@@ -290,8 +319,35 @@ internal object LinuxLyricsOverlay {
         }
 
         private fun clampPosition() {
-            if (outputWidth > 0) x = x.coerceIn(0, (outputWidth - width).coerceAtLeast(0))
-            if (outputHeight > 0) y = y.coerceIn(0, (outputHeight - height).coerceAtLeast(0))
+            if (outputWidth > 0) x = x.coerceIn(outputLeft, outputLeft + (outputWidth - width).coerceAtLeast(0))
+            if (outputHeight > 0) y = y.coerceIn(outputTop, outputTop + (outputHeight - height).coerceAtLeast(0))
+        }
+
+        /**
+         * The screen for the overlay: where it was last (its saved position),
+         * the first time the screen with the app window, else the first screen.
+         */
+        private fun chooseOutput(firstTime: Boolean): Output? {
+            if (outputs.isEmpty()) return null
+            if (!firstTime) outputs.firstOrNull { it.contains(x + width / 2, y + height / 2) }?.let { return it }
+            if (!firstTime) outputs.firstOrNull { it.contains(x, y) }?.let { return it }
+            val point = runCatching { preferredPoint?.invoke() }.getOrNull()
+            if (point != null) {
+                outputs.firstOrNull { it.contains(point.x, point.y) }?.let { return it }
+                // XWayland may report scaled coordinates.
+                outputs.firstOrNull { o -> o.scale > 1 && o.contains(point.x / o.scale, point.y / o.scale) }?.let { return it }
+            }
+            return outputs.first()
+        }
+
+        /** Puts the overlay on [target] at the current position (clamped there): a new surface on that screen. */
+        private fun moveToOutput(target: Output) {
+            destroySurface()
+            current = target
+            clampPosition()
+            createSurface()
+            val rect = intArrayOf(x, y, width, height)
+            java.awt.EventQueue.invokeLater { onGeometryChanged?.invoke(rect[0], rect[1], rect[2], rect[3]) }
         }
 
         private fun send(type: PointerEventType, scroll: Offset = Offset.Zero) {
@@ -332,8 +388,8 @@ internal object LinuxLyricsOverlay {
                     val surface = surface ?: return
                     width = (gestureStartRect[2] + dx).coerceAtLeast(MIN_WIDTH)
                     height = (gestureStartRect[3] + dy).coerceAtLeast(MIN_HEIGHT)
-                    if (outputWidth > 0) width = width.coerceAtMost(outputWidth - x)
-                    if (outputHeight > 0) height = height.coerceAtMost(outputHeight - y)
+                    if (outputWidth > 0) width = width.coerceAtMost(outputLeft + outputWidth - x)
+                    if (outputHeight > 0) height = height.coerceAtMost(outputTop + outputHeight - y)
                     wl.wl_proxy_marshal_flags(layer, 0, null, 1, 0, width, height)
                     wl.wl_proxy_marshal_flags(surface, 6, null, compositorVersion, 0)
                     geometryDirty = true
@@ -369,6 +425,17 @@ internal object LinuxLyricsOverlay {
             }
             x = gestureStartRect[0] + dx
             y = gestureStartRect[1] + dy
+            // Dragged over onto another screen: the overlay continues there (a layer
+            // surface belongs to one screen, so it is recreated on the other one).
+            val centreX = x + width / 2
+            val centreY = y + height / 2
+            val other = outputs.firstOrNull { it !== current && it.contains(centreX, centreY) }
+            if (other != null && current?.contains(centreX, centreY) != true) {
+                gesture = Gesture.None
+                geometryDirty = false
+                moveToOutput(other)
+                return
+            }
             clampPosition()
             geometryDirty = true
             if (!moveSyncPending) commitMove()
@@ -380,7 +447,7 @@ internal object LinuxLyricsOverlay {
             val surface = surface ?: return
             val targetX = x
             val targetY = y
-            wl.wl_proxy_marshal_flags(layer, 3, null, 1, 0, targetY, 0, 0, targetX)
+            wl.wl_proxy_marshal_flags(layer, 3, null, 1, 0, targetY - outputTop, 0, 0, targetX - outputLeft)
             wl.wl_proxy_marshal_flags(surface, 6, null, compositorVersion, 0)
             val callback = wl.wl_proxy_marshal_flags(display, 0, Wl.iface("wl_callback_interface"), 1, 0, null) ?: return
             moveSyncPending = true
@@ -432,13 +499,38 @@ internal object LinuxLyricsOverlay {
                     "wl_compositor" -> { compositorVersion = minOf(version, 4); compositor = bind(reg, name, "wl_compositor_interface", compositorVersion) }
                     "wl_shm" -> shm = bind(reg, name, "wl_shm_interface", 1)
                     "wl_seat" -> seat = bind(reg, name, "wl_seat_interface", 1)?.also { wl.wl_proxy_add_listener(it, seatListener, null) }
-                    "wl_output" -> bind(reg, name, "wl_output_interface", minOf(version, 2))?.let { outputs += it; wl.wl_proxy_add_listener(it, outputListener, null) }
+                    "wl_output" -> bind(reg, name, "wl_output_interface", minOf(version, 2))?.let {
+                        val output = Output(it, name)
+                        outputs += output
+                        wl.wl_proxy_add_listener(it, outputListener, null)
+                        watchLogicalGeometry(output)
+                    }
                     "zxdg_output_manager_v1" -> xdgOutputManager = wl.wl_proxy_marshal_flags(reg, 0, Wl.xdgOutputManagerInterface, 1, 0, name, "zxdg_output_manager_v1", 1, null)
                     "zwlr_layer_shell_v1" -> layerShell = wl.wl_proxy_marshal_flags(reg, 0, Wl.layerShellInterface, 1, 0, name, "zwlr_layer_shell_v1", 1, null)
                 }
             }
         }
-        private val registryRemove = object : RegistryRemove { override fun invoke(data: Pointer?, registry: Pointer?, name: Int) = Unit }
+        private val registryRemove = object : RegistryRemove {
+            override fun invoke(data: Pointer?, registry: Pointer?, name: Int) {
+                val gone = outputs.firstOrNull { it.globalName == name } ?: return
+                outputs.remove(gone)
+                if (gone === current) {
+                    // Its screen was unplugged: show the overlay on another one.
+                    current = null
+                    if (surface != null) { destroySurface(); updateVisibility() }
+                }
+            }
+        }
+
+        /** Logical (scaled) position and size of a screen, from xdg-output. */
+        private fun watchLogicalGeometry(output: Output) {
+            val manager = xdgOutputManager ?: return
+            wl.wl_proxy_marshal_flags(manager, 1, Wl.xdgOutputInterface, 1, 0, null, output.proxy)?.let {
+                xdgOutputs[it] = output
+                wl.wl_proxy_add_listener(it, xdgOutputListener, null)
+            }
+        }
+        private val xdgOutputs = mutableMapOf<Pointer, Output>()
 
         private fun bind(registry: Pointer, name: Int, symbol: String, version: Int): Pointer? {
             val iface = Wl.iface(symbol) ?: return null
@@ -505,31 +597,30 @@ internal object LinuxLyricsOverlay {
         }
 
         private val outputGeometry = object : OutputGeometry {
-            override fun invoke(data: Pointer?, o: Pointer?, x: Int, y: Int, pw: Int, ph: Int, sub: Int, make: Pointer?, model: Pointer?, transform: Int) = Unit
+            override fun invoke(data: Pointer?, o: Pointer?, x: Int, y: Int, pw: Int, ph: Int, sub: Int, make: Pointer?, model: Pointer?, transform: Int) {
+                outputFor(o)?.let { it.geometryX = x; it.geometryY = y }
+            }
         }
         private val outputMode = object : OutputMode {
             override fun invoke(data: Pointer?, o: Pointer?, flags: Int, w: Int, h: Int, refresh: Int) {
-                if (flags and 1 != 0 && o == outputs.firstOrNull()) { outputPixelWidth = w; outputPixelHeight = h; updateOutputSize() }
+                if (flags and 1 != 0) outputFor(o)?.let { it.pixelWidth = w; it.pixelHeight = h }
             }
         }
         private val outputDone = object : OutputDone { override fun invoke(data: Pointer?, o: Pointer?) = Unit }
         private val outputScale = object : OutputScale {
             override fun invoke(data: Pointer?, o: Pointer?, factor: Int) {
-                if (o == outputs.firstOrNull()) { scale = factor.coerceIn(1, 4); updateOutputSize(); needsRender = true }
+                outputFor(o)?.let { it.scale = factor.coerceIn(1, 4); if (it === current) needsRender = true }
             }
         }
-        private var outputPixelWidth = 0
-        private var outputPixelHeight = 0
-        private fun updateOutputSize() {
-            if (logicalSizeKnown) return
-            outputWidth = outputPixelWidth / scale
-            outputHeight = outputPixelHeight / scale
+        // A screen's place and size in logical pixels (right also with fractional scaling, e.g. 125 %).
+        private val xdgLogicalPosition = object : XdgOutputPair {
+            override fun invoke(data: Pointer?, o: Pointer?, a: Int, b: Int) {
+                xdgOutputs[o]?.let { it.logicalX = a; it.logicalY = b }
+            }
         }
-        // The screen's size in logical pixels (right also with fractional scaling, e.g. 125 %).
-        private val xdgLogicalPosition = object : XdgOutputPair { override fun invoke(data: Pointer?, o: Pointer?, a: Int, b: Int) = Unit }
         private val xdgLogicalSize = object : XdgOutputPair {
             override fun invoke(data: Pointer?, o: Pointer?, a: Int, b: Int) {
-                if (a > 0 && b > 0) { outputWidth = a; outputHeight = b; logicalSizeKnown = true }
+                if (a > 0 && b > 0) xdgOutputs[o]?.let { it.logicalWidth = a; it.logicalHeight = b; it.logicalKnown = true }
             }
         }
         private val xdgDone = object : OutputDone { override fun invoke(data: Pointer?, o: Pointer?) = Unit }
@@ -545,7 +636,12 @@ internal object LinuxLyricsOverlay {
             }
         }
         private val layerClosed = object : LayerClosed {
-            override fun invoke(data: Pointer?, layer: Pointer?) { destroySurface() }
+            override fun invoke(data: Pointer?, layer: Pointer?) {
+                // The compositor closed it (e.g. its screen went away): show it again elsewhere.
+                destroySurface()
+                if (current !in outputs) current = null
+                updateVisibility()
+            }
         }
         private val frameDone = object : CallbackDone {
             override fun invoke(data: Pointer?, callback: Pointer?, time: Int) {
@@ -571,14 +667,9 @@ internal object LinuxLyricsOverlay {
             keepAlive += Wl.listener(registryGlobal, registryRemove).also { wl.wl_proxy_add_listener(registry, it, null) }
             wl.wl_display_roundtrip(display)
             wl.wl_display_roundtrip(display) // seat capabilities, output modes and scale
-            val manager = xdgOutputManager
-            val output = outputs.firstOrNull()
-            if (manager != null && output != null) {
-                wl.wl_proxy_marshal_flags(manager, 1, Wl.xdgOutputInterface, 1, 0, null, output)?.let {
-                    wl.wl_proxy_add_listener(it, xdgOutputListener, null)
-                    wl.wl_display_roundtrip(display)
-                }
-            }
+            // Screens announced before the xdg-output manager get their logical geometry now.
+            outputs.filter { o -> o !in xdgOutputs.values }.forEach(::watchLogicalGeometry)
+            wl.wl_display_roundtrip(display)
             check(compositor != null && shm != null && layerShell != null) { "missing Wayland globals" }
         }
 
