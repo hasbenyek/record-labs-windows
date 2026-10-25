@@ -23,6 +23,15 @@ object AppFonts {
         if (Platform.isWindows) FontFamily.Default else runCatching { linuxFamily() }.getOrDefault(FontFamily.Default)
     }
 
+    /**
+     * The lyrics (lyrics page and floating lyrics). Windows keeps Segoe UI; on
+     * Linux they use SF Pro Display when it is installed, else the bundled
+     * Inter Display, a free typeface drawn after it (bold, rounded, tight).
+     */
+    val lyrics: FontFamily by lazy {
+        if (Platform.isWindows) FontFamily.Default else runCatching { linuxLyricsFamily() }.getOrDefault(family)
+    }
+
     /** Which typeface the Linux build ended up with (shown in the self-test). */
     val description: String
         get() = when {
@@ -31,13 +40,42 @@ object AppFonts {
             else -> "Selawik (bundled Segoe UI replacement)"
         }
 
-    private val segoeUiInstalled: Boolean by lazy {
-        // Exact family names only: fontconfig answers a lookup for a missing
-        // family with a substitute, so matchFamily() alone can't tell.
-        runCatching {
-            val fonts = org.jetbrains.skia.FontMgr.default
-            (0 until fonts.familiesCount).any { fonts.getFamilyName(it).equals("Segoe UI", ignoreCase = true) }
-        }.getOrDefault(false)
+    val lyricsDescription: String
+        get() = when {
+            Platform.isWindows -> "Segoe UI (Windows default)"
+            sfProInstalled -> "SF Pro Display (installed)"
+            else -> "Inter Display (bundled)"
+        }
+
+    private val segoeUiInstalled: Boolean by lazy { installed("Segoe UI") }
+    private val sfProInstalled: Boolean by lazy { installed("SF Pro Display") }
+
+    // Exact family names only: fontconfig answers a lookup for a missing
+    // family with a substitute, so matchFamily() alone can't tell.
+    private fun installed(name: String): Boolean = runCatching {
+        val fonts = org.jetbrains.skia.FontMgr.default
+        (0 until fonts.familiesCount).any { fonts.getFamilyName(it).equals(name, ignoreCase = true) }
+    }.getOrDefault(false)
+
+    @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
+    private fun linuxLyricsFamily(): FontFamily = if (sfProInstalled) {
+        FontFamily(
+            SystemFont("SF Pro Display", FontWeight.Normal),
+            SystemFont("SF Pro Display", FontWeight.Medium),
+            SystemFont("SF Pro Display", FontWeight.SemiBold),
+            SystemFont("SF Pro Display", FontWeight.Bold),
+            SystemFont("SF Pro Display", FontWeight.ExtraBold),
+            SystemFont("SF Pro Display", FontWeight.Black),
+        )
+    } else {
+        FontFamily(
+            Font("fonts/inter/InterDisplay-Regular.ttf", FontWeight.Normal),
+            Font("fonts/inter/InterDisplay-Medium.ttf", FontWeight.Medium),
+            Font("fonts/inter/InterDisplay-SemiBold.ttf", FontWeight.SemiBold),
+            Font("fonts/inter/InterDisplay-Bold.ttf", FontWeight.Bold),
+            Font("fonts/inter/InterDisplay-ExtraBold.ttf", FontWeight.ExtraBold),
+            Font("fonts/inter/InterDisplay-Black.ttf", FontWeight.Black),
+        )
     }
 
     @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)

@@ -40,8 +40,9 @@ lalu jendela itu tertutup sendiri dan Record Labs sudah login.
 FONT
 ----
 Di Windows aplikasi memakai Segoe UI. Di Linux dipakai Segoe UI kalau terpasang; kalau tidak,
-Selawik (pengganti Segoe UI open-source dari Microsoft, sudah termasuk di aplikasi), sehingga
-tampilan dan lirik sama dengan versi Windows.
+Selawik (pengganti Segoe UI open-source dari Microsoft, sudah termasuk di aplikasi).
+Lirik (halaman lirik dan floating lyrics/PiP) memakai SF Pro Display kalau terpasang; kalau
+tidak, Inter Display (gratis, mirip SF Pro, sudah termasuk di aplikasi).
 
 
 LISTEN TOGETHER

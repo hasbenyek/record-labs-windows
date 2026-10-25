@@ -8,6 +8,9 @@ import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
@@ -300,6 +303,57 @@ class WindowsRecordLabsConnectIntegrationTest {
                 // packet. A stale hello must not steal output back to Windows.
                 Thread.sleep(250L)
                 assertTrue(WindowsRecordLabsConnect.hasRemotePlaybackDevice())
+            }
+        } finally {
+            WindowsRecordLabsConnect.stop()
+        }
+    }
+
+    @Test
+    fun `large host queue goes out as a bounded window around the current song`() {
+        val accountKey = "email:queue-window-test@recordlabs.invalid"
+        val account = fingerprint(accountKey)
+        val androidId = "queue-window-android"
+        val queue = (0 until 100).map { index ->
+            Track(
+                "track-$index", "A fairly long song title number $index", "Some Artist Name",
+                album = "An Album With A Name", durationMs = 200_000L,
+                artworkUrl = "https://lh3.googleusercontent.com/" + "x".repeat(140) + "=w544-h544-l90-rj",
+            )
+        }
+        WindowsRecordLabsConnect.start(
+            accountKeys = listOf(accountKey),
+            deviceName = "Queue Window Host",
+            playbackProvider = {
+                ConnectPlaybackState(
+                    WindowsRecordLabsConnect.localDeviceId, queue[50], 1_000L, 200_000L, true,
+                    System.currentTimeMillis(), queue = queue, queueIndex = 50,
+                )
+            },
+            onRemoteState = {},
+            onCommand = { _, _, _ -> },
+        )
+        try {
+            connectEventually().use { socket ->
+                socket.soTimeout = 6_000
+                val writer = BufferedWriter(OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8))
+                val reader = BufferedReader(InputStreamReader(socket.getInputStream(), Charsets.UTF_8))
+                writer.write(hello(androidId, account))
+                writer.newLine()
+                writer.flush()
+                val state = generateSequence { reader.readLine() }.first { it.contains("\"type\":\"state\"") }
+                val json = kotlinx.serialization.json.Json.parseToJsonElement(state).jsonObject
+                val sent = json["queue"]!!.jsonArray
+                val offset = json["queueOffset"]!!.jsonPrimitive.content.toInt()
+                val index = json["queueIndex"]!!.jsonPrimitive.content.toInt()
+                assertTrue(state.length < 20_000, "state is ${state.length} bytes")
+                assertEquals(40, offset)
+                assertEquals("track-50", sent[index].jsonObject["trackId"]!!.jsonPrimitive.content)
+                assertTrue(sent.size in 20..60, "window has ${sent.size} songs")
+                assertEquals(100, json["queueTotal"]!!.jsonPrimitive.content.toInt())
+                assertTrue(json["os"]!!.jsonPrimitive.content in setOf("windows", "linux"))
+                assertEquals("windows", json["platform"]!!.jsonPrimitive.content)
+                assertEquals(40, WindowsRecordLabsConnect.sentQueueOffset)
             }
         } finally {
             WindowsRecordLabsConnect.stop()

@@ -625,11 +625,21 @@ private class DesktopFullscreenController(
     }
 
     private var linuxPreviousBounds: java.awt.Rectangle? = null
+    private var linuxWasMaximized = false
 
+    /**
+     * Linux: the window manager owns fullscreen (_NET_WM_STATE_FULLSCREEN via
+     * AWT). Leaving it used to only put the old bounds back; a window that was
+     * maximized (the default) then came back as a borderless, screen-sized
+     * "normal" window with its title bar off screen. Now a maximized window is
+     * maximized again, and a normal window gets its old position and size.
+     */
     private fun linuxFullscreen(enabled: Boolean) {
         val device = frame.graphicsConfiguration.device
         runCatching {
             if (enabled) {
+                val state = frame.extendedState
+                linuxWasMaximized = state and java.awt.Frame.MAXIMIZED_BOTH == java.awt.Frame.MAXIMIZED_BOTH
                 linuxPreviousBounds = java.awt.Rectangle(frame.bounds)
                 if (device.isFullScreenSupported) device.fullScreenWindow = frame
                 else {
@@ -638,10 +648,29 @@ private class DesktopFullscreenController(
                 }
             } else {
                 if (device.fullScreenWindow === frame) device.fullScreenWindow = null
-                linuxPreviousBounds?.let { frame.bounds = it }
+                active = false
+                linuxRestoreWindow(attempt = 0)
             }
         }.onFailure { it.printStackTrace() }
         active = enabled
+    }
+
+    /** Re-applied a few times: some window managers finish leaving fullscreen after a delay and drop the first request. */
+    private fun linuxRestoreWindow(attempt: Int) {
+        if (active) return
+        if (linuxWasMaximized) {
+            if (frame.extendedState and java.awt.Frame.MAXIMIZED_BOTH != java.awt.Frame.MAXIMIZED_BOTH || attempt == 0) {
+                frame.extendedState = java.awt.Frame.NORMAL
+                frame.extendedState = java.awt.Frame.MAXIMIZED_BOTH
+            }
+        } else {
+            linuxPreviousBounds?.let { if (frame.bounds != it) frame.bounds = it }
+        }
+        if (attempt < 3) {
+            javax.swing.Timer(if (attempt == 0) 120 else 300) { linuxRestoreWindow(attempt + 1) }
+                .apply { isRepeats = false }
+                .start()
+        }
     }
 
     private fun enter() {
@@ -883,6 +912,12 @@ fun main(args: Array<String>) {
                     runCatching {
                         window.extendedState = window.extendedState and java.awt.Frame.ICONIFIED.inv()
                         window.toFront()
+                        if (!com.recordlabs.desktop.data.Platform.isWindows) {
+                            // Some Linux window managers ignore toFront() from a window
+                            // that is not focused; briefly going "always on top" raises it.
+                            window.isAlwaysOnTop = true
+                            window.isAlwaysOnTop = false
+                        }
                         window.requestFocus()
                     }
                 }
@@ -1480,6 +1515,18 @@ private fun RecordLabsWindow(
             }
         }
 
+        /**
+         * A song picked in a queue list. While another device plays the sound the
+         * pick goes to it (before, the queue sent a single "next"/"previous", or
+         * this PC took the sound over and started playing itself).
+         */
+        fun selectQueueItem(index: Int) {
+            if (index !in playbackQueue.indices || index == playbackQueueIndex) return
+            if (WindowsRecordLabsConnect.hasRemotePlaybackDevice() && WindowsRecordLabsConnect.sendPlayQueueIndex(index)) return
+            playbackQueueIndex = index
+            beginPlayback(playbackQueue[index])
+        }
+
         fun moveQueueItem(trackId: String, to: Int) {
             val from = playbackQueue.indexOfFirst { it.id == trackId }
             if (from !in playbackQueue.indices || to !in playbackQueue.indices || from == to) return
@@ -1507,6 +1554,12 @@ private fun RecordLabsWindow(
             val index = playbackQueue.indexOfFirst { it.id == trackId }
             if (index !in playbackQueue.indices || playbackQueue[index].id == currentTrack?.id) return
             val activeId = currentTrack?.id
+            if (WindowsRecordLabsConnect.hasRemotePlaybackDevice() && WindowsRecordLabsConnect.sendQueueRemove(trackId)) {
+                // The output device applies it; its next state confirms the queue.
+                playbackQueue = playbackQueue.toMutableList().apply { removeAt(index) }
+                playbackQueueIndex = playbackQueue.indexOfFirst { it.id == activeId }.coerceAtLeast(0)
+                return
+            }
             playbackQueue = playbackQueue.toMutableList().apply { removeAt(index) }
             playbackQueueIndex = playbackQueue.indexOfFirst { it.id == activeId }.coerceAtLeast(0)
             manualQueueTailIndex = manualQueueTailIndex.coerceIn(playbackQueueIndex, playbackQueue.lastIndex.coerceAtLeast(0))
@@ -1569,6 +1622,9 @@ private fun RecordLabsWindow(
             val seed = currentTrack ?: return@LaunchedEffect
             // Settings > Player > Load more automatically.
             if (!com.recordlabs.desktop.data.AppSettings.autoLoadMore.value) return@LaunchedEffect
+            // A silent Connect mirror shows the playing device's queue; adding its own
+            // radio songs made the list jump every time the next state replaced it.
+            if (WindowsRecordLabsConnect.hasRemotePlaybackDevice()) return@LaunchedEffect
             val remaining = playbackQueue.size - playbackQueueIndex - 1
             if (queuePrefetching || remaining >= 24) return@LaunchedEffect
             queuePrefetching = true
@@ -1804,7 +1860,16 @@ private fun RecordLabsWindow(
                             if (remoteQueue.isNotEmpty()) {
                                 playbackQueue = remoteQueue
                                 playbackQueueIndex = remote.queueIndex.coerceIn(0, remoteQueue.lastIndex)
+                                    .let { index -> if (remoteQueue[index].id == remoteTrack.id) index else remoteQueue.indexOfFirst { it.id == remoteTrack.id }.takeIf { it >= 0 } ?: index }
                                 manualQueueTailIndex = playbackQueueIndex
+                            } else if (playbackQueue.none { it.id == remoteTrack.id }) {
+                                // No queue from the other device: show its song rather than
+                                // this PC's old queue that does not contain it.
+                                playbackQueue = listOf(remoteTrack)
+                                playbackQueueIndex = 0
+                                manualQueueTailIndex = 0
+                            } else {
+                                playbackQueueIndex = playbackQueue.indexOfFirst { it.id == remoteTrack.id }
                             }
                             if (currentTrack?.id != remoteTrack.id) {
                                 beginPlayback(
@@ -1875,10 +1940,21 @@ private fun RecordLabsWindow(
                                 }
                             }
                             "queue_next" -> commandTrack?.let(::enqueueTrack)
+                            // Indexes from other devices count from the start of the queue
+                            // window this PC sent them (see WindowsRecordLabsConnect.sentQueueOffset).
                             "queue_move" -> {
-                                val toIndex = position?.toInt()
+                                val toIndex = position?.toInt()?.plus(WindowsRecordLabsConnect.sentQueueOffset)
                                 if (commandTrack != null && toIndex != null) moveQueueItem(commandTrack.id, toIndex)
                             }
+                            "play_queue_index" -> {
+                                val index = position?.toInt()?.plus(WindowsRecordLabsConnect.sentQueueOffset)
+                                if (index != null && index in playbackQueue.indices) {
+                                    mediaPlayer.setVolume(playbackVolume)
+                                    playbackQueueIndex = index
+                                    beginPlayback(playbackQueue[index])
+                                }
+                            }
+                            "queue_remove" -> commandTrack?.let { removeQueueItem(it.id) }
                         }
                     }
                 },
@@ -2613,7 +2689,7 @@ private fun RecordLabsWindow(
                                         visible = globalQueueVisible,
                                         queue = playbackQueue,
                                         activeIndex = playbackQueueIndex,
-                                        onSelect = { skipTrack(it - playbackQueueIndex) },
+                                        onSelect = { selectQueueItem(it) },
                                         onMove = ::moveQueueItem,
                                         onRemove = ::removeQueueItem,
                                         onClose = { globalQueueVisible = false },
@@ -2736,7 +2812,7 @@ homeLoading = homeLoading,
                                             visible = globalQueueVisible,
                                             queue = playbackQueue,
                                             activeIndex = playbackQueueIndex,
-                                            onSelect = { skipTrack(it - playbackQueueIndex) },
+                                            onSelect = { selectQueueItem(it) },
                                             onMove = ::moveQueueItem,
                                             onRemove = ::removeQueueItem,
                                             onClose = { globalQueueVisible = false },
@@ -2789,7 +2865,7 @@ homeLoading = homeLoading,
                                             visible = globalQueueVisible,
                                             queue = playbackQueue,
                                             activeIndex = playbackQueueIndex,
-                                            onSelect = { skipTrack(it - playbackQueueIndex) },
+                                            onSelect = { selectQueueItem(it) },
                                             onMove = ::moveQueueItem,
                                             onRemove = ::removeQueueItem,
                                             onClose = { globalQueueVisible = false },
@@ -2837,7 +2913,7 @@ homeLoading = homeLoading,
                                             visible = globalQueueVisible,
                                             queue = playbackQueue,
                                             activeIndex = playbackQueueIndex,
-                                            onSelect = { skipTrack(it - playbackQueueIndex) },
+                                            onSelect = { selectQueueItem(it) },
                                             onMove = ::moveQueueItem,
                                             onRemove = ::removeQueueItem,
                                             onClose = { globalQueueVisible = false },
@@ -2923,12 +2999,7 @@ homeLoading = homeLoading,
                             onNext = { skipTrack(1) },
                             queue = playbackQueue,
                             queueIndex = playbackQueueIndex,
-                            onQueueTrack = { index ->
-                                if (index in playbackQueue.indices && index != playbackQueueIndex) {
-                                    playbackQueueIndex = index
-                                    beginPlayback(playbackQueue[index])
-                                }
-                            },
+                            onQueueTrack = { index -> selectQueueItem(index) },
                             onQueueMove = ::moveQueueItem,
                             onQueueRemove = ::removeQueueItem,
                             volume = playbackVolume,
@@ -3017,12 +3088,7 @@ homeLoading = homeLoading,
                             onShare = { copyTrackLink(currentTrack!!) },
                             queue = playbackQueue,
                             queueIndex = playbackQueueIndex,
-                            onQueueTrack = { index ->
-                                if (index in playbackQueue.indices && index != playbackQueueIndex) {
-                                    playbackQueueIndex = index
-                                    beginPlayback(playbackQueue[index])
-                                }
-                            },
+                            onQueueTrack = { index -> selectQueueItem(index) },
                             onQueueMove = ::moveQueueItem,
                             onQueueRemove = ::removeQueueItem,
                             volume = playbackVolume,
@@ -3085,17 +3151,12 @@ homeLoading = homeLoading,
                                 visible = playerDestination == null || playerHeaderVisible.value,
                                 enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)) + androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(300)) { -it },
                                 exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(300)) + androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(300)) { -it },
-                                modifier = Modifier.pointerInput(Unit) {
-                                    awaitPointerEventScope {
-                                        while (true) {
-                                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                                            if (event.type == PointerEventType.Enter) headerHovered = true
-                                            if (event.type == PointerEventType.Exit) headerHovered = false
-                                        }
-                                    }
-                                }
                             ) {
                                 LandscapeHeader(
+                                    // Hover is tracked on the header itself, not on a
+                                    // full-width wrapper: that wrapper sat above the side
+                                    // queue and swallowed clicks on its close (X) button.
+                                    onHoverChange = { headerHovered = it },
                                     searchFocusRequester = searchFocusRequester,
                                     query = searchQuery.value,
                                     selectAllTrigger = searchSelectAllTrigger.value,
@@ -3282,8 +3343,8 @@ private fun ConnectDevicesPage(
 
                 Spacer(Modifier.height(6.dp))
                 ConnectDeviceRow(
-                    name = "This Windows PC",
-                    platform = "Windows • This device",
+                    name = if (com.recordlabs.desktop.data.Platform.isWindows) "This Windows PC" else "This Linux PC",
+                    platform = (if (com.recordlabs.desktop.data.Platform.isWindows) "Windows" else "Linux") + " • This device",
                     selected = remoteOwnerId == null,
                     onClick = { onSelect(localDeviceId) },
                 )
@@ -3467,6 +3528,8 @@ private fun LandscapeHeader(
     showLyricsTranslation: Boolean = false,
     /** Width of the side queue panel open at the right: the header ends before it. */
     endInset: androidx.compose.ui.unit.Dp = 0.dp,
+    /** Pointer entered (true) / left (false) the header's buttons and search area. */
+    onHoverChange: (Boolean) -> Unit = {},
 ) {
     var textFieldValue by remember {
         mutableStateOf(
@@ -3547,7 +3610,17 @@ private fun LandscapeHeader(
             },
     )
     BoxWithConstraints(
-        Modifier.fillMaxWidth().padding(start = animatedQueueWidth, end = animatedEndInset).height(72.dp).padding(horizontal = 14.dp),
+        Modifier.fillMaxWidth().padding(start = animatedQueueWidth, end = animatedEndInset).height(72.dp)
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.type == PointerEventType.Enter) onHoverChange(true)
+                        if (event.type == PointerEventType.Exit) onHoverChange(false)
+                    }
+                }
+            }
+            .padding(horizontal = 14.dp),
     ) {
         val animatedStartPadding by androidx.compose.animation.core.animateDpAsState(
             targetValue = startPadding,
@@ -10030,6 +10103,28 @@ private fun TimedLyricText(
     transitionDelayMillis: Int,
     pronunciationEnabled: Boolean,
 ) {
+    // Every lyric line (and its pronunciation) in the lyrics typeface.
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.material.LocalTextStyle provides androidx.compose.material.LocalTextStyle.current.copy(fontFamily = AppFonts.lyrics),
+    ) {
+        TimedLyricTextContent(line, isActive, positionMs, isPlaying, textSize, textAlign, onSeek, depthAlpha, depthBlur, transitionDelayMillis, pronunciationEnabled)
+    }
+}
+
+@Composable
+private fun TimedLyricTextContent(
+    line: RichLyricLine,
+    isActive: Boolean,
+    positionMs: Long,
+    isPlaying: Boolean,
+    textSize: Float,
+    textAlign: androidx.compose.ui.text.style.TextAlign,
+    onSeek: (Long) -> Unit,
+    depthAlpha: Float,
+    depthBlur: Float,
+    transitionDelayMillis: Int,
+    pronunciationEnabled: Boolean,
+) {
     val plain = lyricPlainText(line)
     val transitionEasing = androidx.compose.animation.core.CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
     val activeEmphasis by animateFloatAsState(
@@ -10286,7 +10381,7 @@ private fun TimedLyricText(
                 val letterMeasurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 0)
                 val letterStyle = androidx.compose.material.LocalTextStyle.current.merge(
                     androidx.compose.ui.text.TextStyle(
-                        fontFamily = AppFonts.family,
+                        fontFamily = AppFonts.lyrics,
                         fontSize = layoutSize.sp,
                         lineHeight = (layoutSize * 1.42f).sp,
                         fontWeight = FontWeight.Bold,

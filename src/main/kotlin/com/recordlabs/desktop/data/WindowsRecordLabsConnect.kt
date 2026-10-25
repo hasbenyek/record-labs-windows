@@ -126,6 +126,9 @@ object WindowsRecordLabsConnect {
     /** A write blocked this long means the peer stopped reading: the link is dropped. */
     private const val LINK_WRITE_STALL_MS = 3_000L
     private const val TCP_RETRY_MS = 10_000L
+    private const val QUEUE_BEFORE = 10
+    private const val QUEUE_MAX = 60
+    private const val QUEUE_BUDGET_BYTES = 14_000
     private var socket: MulticastSocket? = null
     private var outboundSocket: MulticastSocket? = null
     private var tcpServer: ServerSocket? = null
@@ -134,6 +137,17 @@ object WindowsRecordLabsConnect {
     private var subnetScan: ScheduledFuture<*>? = null
     private var accountFingerprints = emptySet<String>()
     private var deviceName = "Windows PC"
+    /** Shown to other devices ("Windows", "Linux"); the wire "platform" stays "windows" for compatibility. */
+    private val localOs = if (Platform.isWindows) "windows" else "linux"
+    /**
+     * Index in the full queue of the first song in the last "state" sent. Large
+     * queues go out as a window around the current song (a 100-song state with
+     * artwork links was ~30 KB: over the receive buffer and fragmented on Wi-Fi,
+     * so the other device never got the queue). Queue commands from other
+     * devices use indexes in that window; add this to get the real index.
+     */
+    @Volatile var sentQueueOffset = 0
+        private set
     private val localId = WindowsPreferences.connectDeviceId()
     @Volatile private var ownerTerm = 1L
     @Volatile private var localOwnerActive = false
@@ -238,7 +252,7 @@ object WindowsRecordLabsConnect {
         this.commandHandler = onCommand
         this.localOwnershipHandler = onLocalOwnership
         this.transferStalledHandler = onTransferStalled
-        this.deviceName = deviceName.ifBlank { "Windows PC" }
+        this.deviceName = deviceName.ifBlank { if (Platform.isWindows) "Windows PC" else "Linux PC" }
         if (running.get() && fingerprints == accountFingerprints) return
         stop()
         accountFingerprints = fingerprints
@@ -451,6 +465,18 @@ object WindowsRecordLabsConnect {
         return true
     }
 
+    /** Removes a song from the output device's queue (Record Labs for Windows/Linux outputs). */
+    fun sendQueueRemove(trackId: String): Boolean {
+        val target = _remoteOwnerId.value ?: return false
+        sendTo(target, buildJsonObject {
+            envelope("command")
+            put("target", target)
+            put("command", "queue_remove")
+            put("trackId", trackId)
+        }.toString())
+        return true
+    }
+
     /** Acknowledges that this silent controller has prepared the host track. */
     fun sendTrackReady(ownerId: String, trackId: String) {
         if (ownerId.isBlank() || trackId.isBlank()) return
@@ -501,6 +527,8 @@ object WindowsRecordLabsConnect {
             envelope(if (localOwnsPlayback) "state" else "hello")
             put("name", deviceName)
             put("platform", "windows")
+            // "platform" stays "windows" (desktop) for older apps; "os" says which desktop.
+            put("os", localOs)
             if (state != null && localOwnsPlayback) {
                 put("owner", localId)
                 put("ownerTerm", ownerTerm)
@@ -512,17 +540,12 @@ object WindowsRecordLabsConnect {
                 put("positionMs", state.positionMs)
                 put("durationMs", state.durationMs)
                 put("playing", state.isPlaying)
-                put("queueIndex", state.queueIndex)
-                put("queue", JsonArray(state.queue.take(100).map { track ->
-                    buildJsonObject {
-                        put("trackId", track.id)
-                        put("title", track.title)
-                        put("artist", track.artist)
-                        put("album", track.album)
-                        put("artwork", track.artworkUrl.orEmpty())
-                        put("durationMs", if (track.id == state.track?.id) state.durationMs else track.durationMs)
-                    }
-                }))
+                val (offset, window) = queueWindow(state)
+                sentQueueOffset = offset
+                put("queueIndex", (state.queueIndex - offset).coerceAtLeast(0))
+                put("queueOffset", offset)
+                put("queueTotal", state.queue.size)
+                put("queue", JsonArray(window))
             }
         }.toString())
         val cutoff = System.currentTimeMillis() - PEER_GRACE_MS
@@ -548,6 +571,37 @@ object WindowsRecordLabsConnect {
             _devices.value = seen.values.sortedByDescending { it.lastSeenMs }
         }
         expiredOwner?.let(::clearRemoteOwnership)
+    }
+
+    /**
+     * The queue part of a state message: up to [QUEUE_BEFORE] songs before the
+     * current one and then later songs while the entries stay under
+     * [QUEUE_BUDGET_BYTES] (at most [QUEUE_MAX] songs). Returns the window's
+     * start index in the full queue and its entries.
+     */
+    private fun queueWindow(state: ConnectPlaybackState): Pair<Int, List<kotlinx.serialization.json.JsonObject>> {
+        val queue = state.queue
+        if (queue.isEmpty()) return 0 to emptyList()
+        val current = state.queueIndex.coerceIn(0, queue.lastIndex)
+        val start = (current - QUEUE_BEFORE).coerceAtLeast(0)
+        val entries = mutableListOf<kotlinx.serialization.json.JsonObject>()
+        var bytes = 0
+        for (index in start until queue.size) {
+            val track = queue[index]
+            val entry = buildJsonObject {
+                put("trackId", track.id)
+                put("title", track.title)
+                put("artist", track.artist)
+                put("album", track.album)
+                put("artwork", track.artworkUrl.orEmpty())
+                put("durationMs", if (track.id == state.track?.id) state.durationMs else track.durationMs)
+            }
+            bytes += entry.toString().length + 1
+            // Songs up to the current one always go; later ones while there is room.
+            if (index > current && (bytes > QUEUE_BUDGET_BYTES || entries.size >= QUEUE_MAX)) break
+            entries += entry
+        }
+        return start to entries
     }
 
     private fun kotlinx.serialization.json.JsonObjectBuilder.envelope(type: String) {
@@ -616,6 +670,8 @@ object WindowsRecordLabsConnect {
                     envelope("hello")
                     put("name", deviceName)
                     put("platform", "windows")
+                    // "platform" stays "windows" (desktop) for older apps; "os" says which desktop.
+                    put("os", localOs)
                 }.toString())
                 link.start()
             } catch (_: Throwable) {
@@ -707,6 +763,8 @@ object WindowsRecordLabsConnect {
                         envelope("hello")
                         put("name", deviceName)
                         put("platform", "windows")
+                        // "platform" stays "windows" (desktop) for older apps; "os" says which desktop.
+                        put("os", localOs)
                     }.toString())
                 }
             }
@@ -855,7 +913,7 @@ object WindowsRecordLabsConnect {
     }
 
     private fun receivePackets(input: MulticastSocket) {
-        val buffer = ByteArray(32 * 1024)
+        val buffer = ByteArray(64 * 1024)
         while (running.get() && !input.isClosed) {
             try {
                 val packet = DatagramPacket(buffer, buffer.size)
@@ -924,7 +982,7 @@ object WindowsRecordLabsConnect {
                 id = sender,
                 name = value["name"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
                     ?: known?.name ?: "Record Labs device",
-                platform = value["platform"]?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
+                platform = (value["os"] ?: value["platform"])?.jsonPrimitive?.contentOrNull?.takeIf(String::isNotBlank)
                     ?: known?.platform.orEmpty(),
                 lastSeenMs = now,
                 isPlaybackDevice = owner == sender,
@@ -1042,7 +1100,7 @@ object WindowsRecordLabsConnect {
                     requestTakeover(value["requestedOwnerTerm"]?.jsonPrimitive?.contentOrNull?.toLongOrNull(), sender)
                     return
                 }
-                val commandTrack = if (command == "play_track" || command == "queue_next" || command == "queue_move") {
+                val commandTrack = if (command == "play_track" || command == "queue_next" || command == "queue_move" || command == "queue_remove") {
                     value["trackId"]?.jsonPrimitive?.contentOrNull
                         ?.takeIf(String::isNotBlank)
                         ?.let { trackId ->

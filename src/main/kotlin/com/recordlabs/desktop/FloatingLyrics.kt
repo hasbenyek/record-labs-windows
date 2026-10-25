@@ -311,6 +311,11 @@ fun FloatingLyricsWindow(
         transparent = true,
         alwaysOnTop = true,
         resizable = true,
+        // Linux window managers give keyboard focus to every window that appears,
+        // so the lyrics window took focus away from the app the user had just
+        // switched to (on Windows a topmost window shown this way does not).
+        // Its buttons, dragging and scrolling still work without focus.
+        focusable = com.recordlabs.desktop.data.Platform.isWindows,
     ) {
         // Multi-monitor dynamic watcher: catches monitor plug/unplug & resolution/topology changes
         LaunchedEffect(window) {
@@ -715,7 +720,7 @@ fun WindowScope.FloatingLyricsContent(
                             modifier = Modifier.size(18.dp),
                         )
                         Text(
-                            fontFamily = AppFonts.family,
+                            fontFamily = AppFonts.lyrics,
                             text = "${track.title} • ${track.artist}",
                             color = Color.White.copy(alpha = 0.75f),
                             fontSize = 11.sp,
@@ -824,7 +829,7 @@ fun WindowScope.FloatingLyricsContent(
                         modifier = Modifier.size(13.dp),
                     )
                     Text(
-                        fontFamily = AppFonts.family,
+                        fontFamily = AppFonts.lyrics,
                         text = "Sync",
                         color = Color.White.copy(alpha = 0.90f),
                         fontSize = 11.sp,
@@ -848,7 +853,7 @@ fun NetflixSubtitleText(
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         // Layer 1: Extra wide ambient diffuse halo
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = text,
             fontSize = fontSize,
             fontWeight = fontWeight,
@@ -865,7 +870,7 @@ fun NetflixSubtitleText(
         )
         // Layer 2: Medium ambient spreading shadow
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = text,
             fontSize = fontSize,
             fontWeight = fontWeight,
@@ -882,7 +887,7 @@ fun NetflixSubtitleText(
         )
         // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = text,
             fontSize = fontSize,
             fontWeight = fontWeight,
@@ -899,7 +904,7 @@ fun NetflixSubtitleText(
         )
         // Layer 4: Foreground crisp white text
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = text,
             fontSize = fontSize,
             fontWeight = fontWeight,
@@ -1021,7 +1026,7 @@ fun NetflixSubtitleKaraokeLine(
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         // Layer 1: Extra wide ambient diffuse halo
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = plain,
             fontSize = fontSize,
             lineHeight = lineHeight,
@@ -1040,7 +1045,7 @@ fun NetflixSubtitleKaraokeLine(
         )
         // Layer 2: Medium ambient spreading shadow
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = plain,
             fontSize = fontSize,
             lineHeight = lineHeight,
@@ -1059,7 +1064,7 @@ fun NetflixSubtitleKaraokeLine(
         )
         // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = plain,
             fontSize = fontSize,
             lineHeight = lineHeight,
@@ -1078,7 +1083,7 @@ fun NetflixSubtitleKaraokeLine(
         )
         // Layer 4: Base foreground gray text
         Text(
-            fontFamily = AppFonts.family,
+            fontFamily = AppFonts.lyrics,
             text = plain,
             fontSize = fontSize,
             lineHeight = lineHeight,
@@ -1102,7 +1107,7 @@ fun NetflixSubtitleKaraokeLine(
             if (line.words.isNotEmpty()) {
                 if (globalSweep > 0.01f) {
                     Text(
-                        fontFamily = AppFonts.family,
+                        fontFamily = AppFonts.lyrics,
                         text = plain,
                         fontSize = fontSize,
                         lineHeight = lineHeight,
@@ -1168,7 +1173,7 @@ fun NetflixSubtitleKaraokeLine(
                 )
                 if (activeEmphasis > 0.01f) {
                     Text(
-                        fontFamily = AppFonts.family,
+                        fontFamily = AppFonts.lyrics,
                         text = plain,
                         fontSize = fontSize,
                         lineHeight = lineHeight,

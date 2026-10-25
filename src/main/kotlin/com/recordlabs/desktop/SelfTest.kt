@@ -25,7 +25,7 @@ internal fun runAudioSelfTest(): Int {
         version != null
     }
     if (!toolsOk) return 1
-    println("SELF-TEST font: ${AppFonts.description}")
+    println("SELF-TEST font: ${AppFonts.description}; lyrics: ${AppFonts.lyricsDescription}")
     val wav = selfTestToneWav(seconds = 3)
     val server = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0).apply {
         createContext("/tone.wav") { exchange ->
