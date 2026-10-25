@@ -30,22 +30,25 @@ Tanpa secret ini installer tetap jadi, tapi Listen Together ditolak server.
    tampil di aplikasi pada bagian "What's new". Kalau tidak ada, catatannya cuma
    "Record Labs 0.1.3" (bisa diedit nanti di halaman release GitHub).
 
-3. **Commit, tag, push**:
+3. **Commit dan push ke `main`**:
 
    ```
    git commit -am "Record Labs 0.1.3"
-   git tag v0.1.3
-   git push origin main v0.1.3
+   git push origin main
    ```
+
+   Versi baru di `main` yang belum punya rilis langsung dirilis; tag `v0.1.3`
+   dibuat otomatis. (Push tag `v0.1.3` sendiri juga tetap bisa.)
 
 4. **Tunggu GitHub Actions** (tab *Actions* → "Release (Windows + Linux)", ±30–45 menit):
    - Windows: `.msi` dibuat di mesin Windows GitHub (sama seperti `gradlew.bat packageMsi`).
    - Linux: `.deb`, `.rpm`, AppImage, paket Arch dibuat lalu dites di 7 distro.
-   - Kalau semua lulus, Release `v0.1.3` terbit otomatis (bukan pre-release) berisi
-     semua file. Kalau ada yang gagal, tidak ada rilis yang terbit.
+   - Kalau semua lulus, Release `v0.1.3` terbit (bukan pre-release) berisi semua file;
+     rilis baru tampil setelah semua file selesai diunggah. Kalau ada yang gagal,
+     tidak ada rilis yang terbit.
 
-   Tag harus sama dengan versi di kode (`v0.1.3` ↔ `0.1.3`); kalau beda, build
-   langsung berhenti dengan pesan error.
+   Push ke `main` tanpa menaikkan versi hanya membangun dan mengetes (tidak merilis).
+   Kalau memakai tag, tag harus sama dengan versi di kode (`v0.1.3` ↔ `0.1.3`).
 
 ## Yang terjadi di aplikasi pengguna
 

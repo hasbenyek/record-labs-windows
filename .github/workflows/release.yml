@@ -1,6 +1,7 @@
 name: Release (Windows + Linux)
 
-# One version tag (v1.2.3) builds every installer and publishes one release:
+# A new version on main (or a pushed tag v1.2.3) builds every installer and
+# publishes one release:
 #   - Windows: the .msi (on a Windows runner, like "gradlew.bat packageMsi")
 #   - Linux: .deb, .rpm, AppImage, Arch tarball + PKGBUILD, each tested in a
 #     clean container of its distributions
@@ -13,8 +14,10 @@ name: Release (Windows + Linux)
 on:
   push:
     tags: ['v*']
-    # Builds and tests (no release) while the Linux port is being reviewed.
-    branches: ['linux-port']
+    # main: a push with a version that has no release yet publishes it (and
+    # creates its tag v1.2.3), so raising the version and pushing is enough.
+    # linux-port: build and test only.
+    branches: ['main', 'linux-port']
   workflow_dispatch:
 
 permissions:
@@ -163,28 +166,49 @@ jobs:
   release:
     # Only when every installer was built and the Linux ones passed their tests.
     needs: [test, windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Which release
+        id: which
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"; echo "publish=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          v="$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)"
+          echo "tag=v$v" >> "$GITHUB_OUTPUT"
+          # main: only a version that has no release yet.
+          # (A draft left by an interrupted run is finished.)
+          if [ "$(gh release view "v$v" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" = "false" ]; then
+            echo "Release v$v already exists; nothing to publish."; echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
       # Every installer (linux-* and windows-installer) into one folder.
       - uses: actions/download-artifact@v4
+        if: steps.which.outputs.publish == 'true'
         with:
           path: packages
           merge-multiple: true
       - name: Publish the release
+        if: steps.which.outputs.publish == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ steps.which.outputs.tag }}
         run: |
           ls -la packages
           # Release notes (shown in the app under "What's new"): RELEASE_NOTES.md
           # if present, else a short default. Edit them on GitHub afterwards if wanted.
           if [ -s RELEASE_NOTES.md ]; then cp RELEASE_NOTES.md notes.md; else echo "Record Labs ${TAG#v}" > notes.md; fi
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false
-          else
-            # A normal (not pre-)release: the apps' update check skips drafts and pre-releases.
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Record Labs ${TAG#v}" --notes-file notes.md --latest
+          # Prepared as a draft and published only once every file is uploaded, so an
+          # app checking meanwhile never sees a release without its installer.
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" --title "Record Labs ${TAG#v}" --notes-file notes.md
           fi
           gh release upload "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --clobber
+          # A normal (not pre-)release marked latest: the apps' update check skips drafts and
+          # pre-releases. Publishing also creates the tag on this commit if it doesn't exist.
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false --latest
