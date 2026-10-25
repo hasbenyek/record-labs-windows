@@ -12,7 +12,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 HERE="$ROOT/packaging/linux"
-VERSION="${1:-$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/build.gradle.kts" | tr -d '\r' | head -1)}"
+VERSION="${1:-$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' "$ROOT/build.gradle.kts" | tr -d '\r' | head -1)}"
 APP_IMAGE="${APP_IMAGE_DIR:-$(find "$ROOT/build" -maxdepth 6 -type d -path '*binaries/main/app/*' -name 'Record Labs' | head -1)}"
 OUT="$ROOT/build/linux-packages"
 WORK="$ROOT/build/linux-packaging"
@@ -41,6 +41,12 @@ stage_tree() {
   install -m 644 "$ROOT/src/main/resources/recordlabs.png" "$dest/usr/share/icons/hicolor/256x256/apps/$NAME.png"
   sed "s/@VERSION@/$VERSION/; s/@DATE@/$(date -u +%Y-%m-%d)/" "$HERE/record-labs.metainfo.xml" \
     > "$dest/usr/share/metainfo/$NAME.metainfo.xml"
+  # Firewall definitions for Record Labs Connect (UDP 45922, TCP 45923). Not
+  # switched on by the package; the app and PANDUAN-LINUX show the command.
+  install -D -m 644 "$HERE/record-labs-connect.xml" "$dest/usr/lib/firewalld/services/record-labs-connect.xml"
+  if [ "${2:-tar}" = deb ]; then
+    install -D -m 644 "$HERE/record-labs.ufw" "$dest/etc/ufw/applications.d/record-labs"
+  fi
   # Marks the installation type for the in-app updater.
   echo "${2:-tar}" > "$dest$INSTALL_DIR/lib/app/package-type"
 }
@@ -52,6 +58,7 @@ build_deb() {
   local root="$WORK/deb"
   stage_tree "$root" deb
   mkdir -p "$root/DEBIAN"
+  echo "/etc/ufw/applications.d/record-labs" > "$root/DEBIAN/conffiles"
   # Libraries the app takes from the system (everything else is bundled).
   # Alternatives cover Debian/Ubuntu before and after the 64-bit time_t rename.
   cat > "$root/DEBIAN/control" <<EOF
@@ -123,6 +130,7 @@ $INSTALL_DIR
 /usr/share/applications/$NAME.desktop
 /usr/share/icons/hicolor/256x256/apps/$NAME.png
 /usr/share/metainfo/$NAME.metainfo.xml
+/usr/lib/firewalld/services/record-labs-connect.xml
 EOF
   rpmbuild --quiet --define "_topdir $top" -bb "$top/SPECS/$NAME.spec"
   find "$top/RPMS" -name '*.rpm' -exec cp {} "$OUT/" \;

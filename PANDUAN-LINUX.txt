@@ -45,6 +45,19 @@ Lirik (halaman lirik dan floating lyrics/PiP) memakai SF Pro Display kalau terpa
 tidak, Inter Display (gratis, mirip SF Pro, sudah termasuk di aplikasi).
 
 
+RECORD LABS CONNECT
+-------------------
+Connect memakai Wi-Fi yang sama dan akun Google yang sama (port UDP 45922 dan TCP 45923).
+- Pop!_OS / Ubuntu: firewall (ufw) biasanya mati, tidak perlu apa-apa. Kalau ufw dinyalakan:
+       sudo ufw allow 45922/udp && sudo ufw allow 45923/tcp
+- Fedora: zona bawaan desktop sudah mengizinkan. openSUSE (firewall aktif secara bawaan):
+       sudo firewall-cmd --permanent --add-port=45922/udp --add-port=45923/tcp && sudo firewall-cmd --reload
+  Kalau firewall memblokir, layar Devices Connect di aplikasi juga menampilkan perintah ini.
+- Cek tanpa login:   record-labs --self-test-connect
+  (buka Record Labs di HP/PC lain selama 20 detik; perangkat yang terdengar akan dicantumkan)
+- Jaringan tamu / "AP isolation" di router mencegah perangkat saling melihat.
+
+
 FLOATING LYRICS (PiP)
 ---------------------
 Di desktop Wayland (COSMIC, KDE Plasma, sway, Hyprland) lirik melayang tampil sebagai overlay
@@ -71,6 +84,7 @@ CEK & MASALAH
 -------------
 - Cek audio, yt-dlp, Deno dan font (aplikasi terpasang):   record-labs --self-test-audio
 - Cek browser untuk login:                                  record-labs --self-test-login
+- Cek Record Labs Connect (jaringan, firewall, perangkat lain): record-labs --self-test-connect
   (dari source:  ./gradlew run --args="--self-test-audio")
 - Pesan error: jalankan dari terminal (record-labs atau ./run-linux.sh) lalu lihat outputnya.
 - "bad interpreter" saat menjalankan ./gradlew: jalankan  sed -i 's/\r$//' gradlew

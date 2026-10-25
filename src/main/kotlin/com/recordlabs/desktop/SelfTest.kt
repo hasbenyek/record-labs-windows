@@ -121,3 +121,66 @@ internal fun runLoginSelfTest(): Int {
         1
     }
 }
+
+/**
+ * `record-labs --self-test-connect`: checks what Record Labs Connect needs on
+ * this computer and listens 20 s for other Record Labs devices on the network
+ * (open Record Labs on the phone/other PC meanwhile). Prints the network
+ * interfaces, the firewall state with the command to open Connect's ports,
+ * and every device heard (name, platform, address). Needs no Google login.
+ */
+internal fun runConnectSelfTest(): Int {
+    println("CONNECT-TEST device name: ${com.recordlabs.desktop.data.Platform.deviceName}")
+    val interfaces = runCatching {
+        java.net.NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }
+            .flatMap { network -> network.inetAddresses.toList().filterIsInstance<java.net.Inet4Address>().map { "${network.name} ${it.hostAddress}" } }
+    }.getOrDefault(emptyList())
+    if (interfaces.isEmpty()) println("CONNECT-TEST FAIL: no IPv4 network (connect to Wi-Fi or Ethernet)")
+    interfaces.forEach { println("CONNECT-TEST network: $it") }
+    val firewall = com.recordlabs.desktop.data.LinuxFirewall.check()
+    when {
+        com.recordlabs.desktop.data.Platform.isWindows -> println("CONNECT-TEST firewall: Windows (allowed by the installer)")
+        firewall == null -> println("CONNECT-TEST firewall: none active")
+        firewall.connectAllowed == true -> println("CONNECT-TEST firewall: ${firewall.tool}, Connect ports open")
+        else -> {
+            println("CONNECT-TEST firewall: ${firewall.tool} ${if (firewall.connectAllowed == false) "BLOCKS Connect" else "is on (cannot see its rules without admin rights)"}")
+            println("CONNECT-TEST open the ports with: ${firewall.fixCommand}")
+        }
+    }
+    val heard = linkedMapOf<String, String>()
+    val socket = runCatching {
+        java.net.MulticastSocket(null as java.net.SocketAddress?).apply {
+            reuseAddress = true
+            bind(java.net.InetSocketAddress(45_922))
+            soTimeout = 500
+            runCatching { joinGroup(java.net.InetSocketAddress(java.net.InetAddress.getByName("239.255.42.99"), 45_922), null) }
+        }
+    }.getOrElse {
+        println("CONNECT-TEST FAIL: cannot listen on UDP 45922 (${it.message})")
+        return 1
+    }
+    println("CONNECT-TEST listening 20 s for Record Labs devices (open Record Labs on your other devices now)...")
+    val buffer = ByteArray(64 * 1024)
+    val deadline = System.currentTimeMillis() + 20_000L
+    socket.use {
+        while (System.currentTimeMillis() < deadline) {
+            val packet = java.net.DatagramPacket(buffer, buffer.size)
+            try { it.receive(packet) } catch (_: java.net.SocketTimeoutException) { continue }
+            val json = runCatching {
+                kotlinx.serialization.json.Json.parseToJsonElement(String(packet.data, packet.offset, packet.length, Charsets.UTF_8)) as kotlinx.serialization.json.JsonObject
+            }.getOrNull() ?: continue
+            fun field(name: String) = (json[name] as? kotlinx.serialization.json.JsonPrimitive)?.content.orEmpty()
+            val device = field("device").ifBlank { continue }
+            if (device == com.recordlabs.desktop.data.WindowsPreferences.connectDeviceId()) continue
+            val label = "${field("name").ifBlank { "(no name yet)" }} | ${field("os").ifBlank { field("platform") }.ifBlank { "android?" }} | ${packet.address.hostAddress}"
+            if (heard.put(device, label) == null) println("CONNECT-TEST heard: $label")
+        }
+    }
+    return if (heard.isEmpty()) {
+        println("CONNECT-TEST nothing heard. Check: same Wi-Fi (not a guest network), Record Labs open on the other device, the firewall above, and that the router does not isolate devices (\"AP/client isolation\").")
+        1
+    } else {
+        println("CONNECT-TEST PASS: ${heard.size} device(s) heard. If they don't show in the app, check that both use the same Google account.")
+        0
+    }
+}

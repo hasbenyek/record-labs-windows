@@ -1,10 +1,14 @@
-name: Linux packages
+name: Release (Windows + Linux)
 
-# Builds the Linux installers (.deb, .rpm, AppImage, Arch tarball + PKGBUILD),
-# tests each one in a clean container of the target distributions, and
-# attaches them to the GitHub release when a version tag (v1.2.3) is pushed.
-# Windows installers are still built and uploaded the usual way; both sets of
-# files can sit in the same release because each app only looks for its own.
+# One version tag (v1.2.3) builds every installer and publishes one release:
+#   - Windows: the .msi (on a Windows runner, like "gradlew.bat packageMsi")
+#   - Linux: .deb, .rpm, AppImage, Arch tarball + PKGBUILD, each tested in a
+#     clean container of its distributions
+# Installed apps find the release and pick the file for their own system.
+# Pushes to linux-port only build and test (no release).
+#
+# Needs the repository secret LISTEN_TOGETHER_KEY (Settings > Secrets and
+# variables > Actions); without it the installers work but Listen Together is refused.
 
 on:
   push:
@@ -44,7 +48,7 @@ jobs:
       - name: Version
         id: version
         run: |
-          v="$(sed -n 's/^version = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)"
+          v="$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)"
           # The app compares its own version (from build.gradle.kts / AppInfo)
           # with the release tag, so they must match or it would always see an update.
           if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
@@ -60,12 +64,47 @@ jobs:
         run: packaging/linux/build-all.sh "${{ steps.version.outputs.version }}"
 
       - name: Unit tests (audio through libVLC, Linux updater, Deno daemon)
-        run: ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest" --tests "com.recordlabs.desktop.data.LinuxDenoCipherDaemonTest"
+        run: ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest" --tests "com.recordlabs.desktop.data.LinuxDenoCipherDaemonTest" --tests "com.recordlabs.desktop.data.LinuxFirewallTest"
 
       - uses: actions/upload-artifact@v4
         with:
           name: linux-packages
           path: build/linux-packages/*
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # The .NET media helper (RecordLabs.NativePlayer) is compiled during the build.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Build the .msi
+        env:
+          LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
+        shell: pwsh
+        run: |
+          ./gradlew.bat --no-daemon packageMsi
+          $msi = Get-ChildItem -Recurse build -Filter *.msi | Where-Object { $_.FullName -match 'binaries\\main\\msi' } | Select-Object -First 1
+          if (-not $msi) { throw "No .msi was produced" }
+          New-Item -ItemType Directory -Force windows-installer | Out-Null
+          # A plain file name (GitHub would turn the space into a dot anyway).
+          Copy-Item $msi.FullName ("windows-installer/RecordLabs-" + ($msi.BaseName -replace '^Record Labs-', '') + ".msi")
+          Get-ChildItem windows-installer
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: windows-installer/*.msi
           if-no-files-found: error
 
   test:
@@ -93,19 +132,33 @@ jobs:
         run: packaging/linux/test-install.sh "${{ matrix.image }}" packages/${{ matrix.package }} --gui
 
   release:
-    needs: test
+    # Only when every installer was built and the Linux ones passed their tests.
+    needs: [test, windows]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: linux-packages
           path: packages
-      - name: Attach to the release
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: packages
+      - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Record Labs ${TAG#v}" --notes "Record Labs ${TAG#v}"
+          ls -la packages
+          # Release notes (shown in the app under "What's new"): RELEASE_NOTES.md
+          # if present, else a short default. Edit them on GitHub afterwards if wanted.
+          if [ -s RELEASE_NOTES.md ]; then cp RELEASE_NOTES.md notes.md; else echo "Record Labs ${TAG#v}" > notes.md; fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease=false
+          else
+            # A normal (not pre-)release: the apps' update check skips drafts and pre-releases.
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "Record Labs ${TAG#v}" --notes-file notes.md --latest
+          fi
           gh release upload "$TAG" packages/* --repo "$GITHUB_REPOSITORY" --clobber

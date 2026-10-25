@@ -18,7 +18,10 @@ val javaFxClassifier = if (isWindowsHost) "win" else if (isLinuxHost) "linux" el
 val nativeResourceDir = if (isWindowsHost) "windows-x64" else "linux-x64"
 
 group = "com.recordlabs.desktop"
-version = "0.1.2"
+// The one place for the app version (installers, update checks). Change it with
+// "gradlew setVersion -PnewVersion=1.2.3", which also updates AppInfo.BUILD_VERSION.
+val appVersion = "0.1.2"
+version = appVersion
 
 kotlin {
     jvmToolchain(21)
@@ -173,7 +176,7 @@ compose.desktop {
                 "jdk.localedata", "jdk.charsets", "jdk.zipfs", "jdk.jsobject", "jdk.xml.dom", "jdk.net",
                 "jdk.security.auth", "jdk.accessibility", "jdk.naming.dns",
             )
-            outputBaseDir.set(project.layout.buildDirectory.dir("compose-0.1.2-final/binaries"))
+            outputBaseDir.set(project.layout.buildDirectory.dir("compose-$appVersion-final/binaries"))
             if (isWindowsHost) {
                 targetFormats(
                     org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
@@ -189,7 +192,7 @@ compose.desktop {
                 )
             }
             packageName = "Record Labs"
-            packageVersion = "0.1.2"
+            packageVersion = appVersion
             description = "Record Labs desktop music player"
             vendor = "Record Labs"
             windows {
@@ -242,12 +245,12 @@ if (isWindowsHost) {
 
 val packageExeWithFirewall by tasks.registering(Exec::class) {
     dependsOn("createDistributable", "unzipWix")
-    val appImage = layout.buildDirectory.dir("compose-0.1.2-final/binaries/main/app/Record Labs")
+    val appImage = layout.buildDirectory.dir("compose-$appVersion-final/binaries/main/app/Record Labs")
     val outputTag = providers.gradleProperty("recordLabsInstallerOutputTag").orElse("latest")
     val destination = outputTag.flatMap { tag ->
-        layout.buildDirectory.dir("compose-0.1.2-firewall-/binaries/main/exe")
+        layout.buildDirectory.dir("compose-$appVersion-firewall-/binaries/main/exe")
     }
-    val installer = destination.map { it.file("Record Labs-0.1.2.exe") }
+    val installer = destination.map { it.file("Record Labs-$appVersion.exe") }
     val wixResources = layout.projectDirectory.dir("src/installer/wix")
     val jpackage = layout.file(
         providers.provider { File(System.getProperty("java.home"), "bin/jpackage.exe") }
@@ -262,7 +265,7 @@ val packageExeWithFirewall by tasks.registering(Exec::class) {
     args(
         "--type", "exe",
         "--name", "Record Labs",
-        "--app-version", "0.1.2",
+        "--app-version", appVersion,
         "--vendor", "Record Labs",
         "--description", "Record Labs desktop music player",
         "--app-image", appImage.get().asFile.absolutePath,
@@ -288,7 +291,22 @@ if (isWindowsHost) afterEvaluate {
     }
 }
 
-
-
-
-
+// "gradlew setVersion -PnewVersion=1.2.3": sets the version here and in
+// AppInfo.BUILD_VERSION (AppSettings.kt). Then commit and push a tag v1.2.3 to release.
+val setVersion by tasks.registering {
+    val newVersion = providers.gradleProperty("newVersion")
+    doLast {
+        val target = newVersion.orNull?.trim()?.removePrefix("v")
+            ?: error("Use: gradlew setVersion -PnewVersion=1.2.3")
+        require(Regex("""\d+\.\d+\.\d+""").matches(target)) { "Version must look like 1.2.3" }
+        fun edit(path: String, pattern: Regex, replacement: String) {
+            val file = rootProject.file(path)
+            val text = file.readText()
+            check(pattern.containsMatchIn(text)) { "Version not found in $path" }
+            file.writeText(text.replaceFirst(pattern, replacement))
+        }
+        edit("build.gradle.kts", Regex("""val appVersion = "[^"]*""""), "val appVersion = \"$target\"")
+        edit("src/main/kotlin/com/recordlabs/desktop/data/AppSettings.kt", Regex("""BUILD_VERSION = "[^"]*""""), "BUILD_VERSION = \"$target\"")
+        println("Version set to $target. Commit, then tag and push: git tag v$target && git push origin v$target")
+    }
+}

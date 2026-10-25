@@ -796,6 +796,7 @@ fun main(args: Array<String>) {
     // Packaging check: play a tone through the real audio path, no window.
     if ("--self-test-audio" in args) kotlin.system.exitProcess(runAudioSelfTest())
     if ("--self-test-login" in args) kotlin.system.exitProcess(runLoginSelfTest())
+    if ("--self-test-connect" in args) kotlin.system.exitProcess(runConnectSelfTest())
     // Load JavaFX media natives before the off-screen video decoder starts.
     ensureJavaFxMediaNatives()
     val shutdownAction = {
@@ -1939,7 +1940,11 @@ private fun RecordLabsWindow(
                             // 500-1000 ms controller window. While the mirror is
                             // still loading, seeking or resuming would restart it.
                             val mirrorReady = mediaPlayer.isReady
-                            if (mirrorReady && (drift > 50L || drift < -250L)) mediaPlayer.seekTo(target)
+                            // Linux (VLC): every seek on a stream re-buffers for a moment, so the
+                            // silent mirror only re-syncs on a clear gap; seeking at every small
+                            // drift kept it half-loaded and the handoff then had to reload the song.
+                            val (aheadLimit, behindLimit) = if (com.recordlabs.desktop.data.Platform.isWindows) 50L to -250L else 400L to -900L
+                            if (mirrorReady && (drift > aheadLimit || drift < behindLimit)) mediaPlayer.seekTo(target)
                             if (mirrorReady && remote.isPlaying && !mediaPlayer.isPlaying) mediaPlayer.resume()
                             if (mirrorReady && !remote.isPlaying && mediaPlayer.isPlaying) mediaPlayer.pause()
                             playbackPositionMs = target
@@ -3445,6 +3450,30 @@ private fun ConnectDevicesPage(
                     )
                     discovery.lastError?.let { error ->
                         Text(error, color = Color(0xFFFF6B6B), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp))
+                    }
+                    // Linux: a firewall that blocks Connect's ports (openSUSE by default).
+                    if (!com.recordlabs.desktop.data.Platform.isWindows) {
+                        val firewall by androidx.compose.runtime.produceState<com.recordlabs.desktop.data.LinuxFirewall.Status?>(null) {
+                            value = withContext(Dispatchers.IO) { com.recordlabs.desktop.data.LinuxFirewall.check() }
+                        }
+                        firewall?.takeIf { it.connectAllowed != true }?.let { status ->
+                            Text(
+                                if (status.connectAllowed == false) "The ${status.tool} firewall blocks Record Labs Connect. Open its ports once in a terminal:"
+                                else "The ${status.tool} firewall is on and may block Record Labs Connect. If no device appears, run in a terminal:",
+                                color = Color(0xFFFFB86B),
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp),
+                            )
+                            androidx.compose.foundation.text.selection.SelectionContainer {
+                                Text(
+                                    status.fixCommand,
+                                    color = Color.White,
+                                    fontSize = 12.sp,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
+                                )
+                            }
+                        }
                     }
                     if (discovery.rejectedAccountPackets > 0) {
                         Text(
