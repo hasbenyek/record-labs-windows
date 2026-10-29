@@ -108,7 +108,7 @@ private val javaFxToolkitStarted = AtomicBoolean(false)
  * JavaFX's Windows network media path stalls unpredictably; local playback is
  * both smoother and keeps the static cover visible during preparation.
  */
-private object AnimatedArtworkDiskCache {
+internal object AnimatedArtworkDiskCache {
     private val directory = File(WindowsStorage.directory, "animated-artwork").apply { mkdirs() }
     private val waiters = ConcurrentHashMap<String, Pair<MutableList<(String?) -> Unit>, okhttp3.Call>>()
     private val client = OkHttpClient.Builder()
@@ -124,6 +124,11 @@ private object AnimatedArtworkDiskCache {
         val destination = cacheFile(remoteUrl)
         destination.delete()
         File(destination.parentFile, destination.name + ".part").delete()
+    }
+
+    fun prefetch(remoteUrl: String) {
+        if (localUri(remoteUrl) != null) return
+        resolve(remoteUrl, retries = 2) { /* background download into cache */ }
     }
 
     fun resolve(remoteUrl: String, retries: Int = 3, onResolved: (String?) -> Unit): AutoCloseable {
@@ -235,6 +240,9 @@ fun ensureJavaFxMediaNatives() {
     if (!javaFxMediaNativesLoaded.compareAndSet(false, true)) return
     try {
         val resourceDir = System.getProperty("compose.application.resources.dir")
+        val isWindows = com.recordlabs.desktop.data.Platform.isWindows
+        val platformVlcDirName = if (isWindows) "windows-x64/vlc" else "linux-x64/vlc"
+
         val candidates = buildList {
             if (!resourceDir.isNullOrBlank()) {
                 add(File(resourceDir, "vlc"))
@@ -247,22 +255,21 @@ fun ensureJavaFxMediaNatives() {
                     add(File(installRoot, "app/resources"))
                 }
             }
-            val nativeDir = com.recordlabs.desktop.data.Platform.nativeResourceDirName
-            add(File(System.getProperty("user.dir"), "src/appResources/$nativeDir/vlc"))
-            add(File("src/appResources/$nativeDir/vlc"))
-            if (com.recordlabs.desktop.data.Platform.isWindows) {
+            add(File(System.getProperty("user.dir"), "src/appResources/$platformVlcDirName"))
+            add(File("src/appResources/$platformVlcDirName"))
+            if (isWindows) {
                 add(File(System.getProperty("user.dir"), "src/main/resources/vlc"))
                 add(File("src/main/resources/vlc"))
             }
         }
 
-        // Windows ships libvlc.dll; Linux bundles libvlc.so (+ .so.5). When a
-        // Linux build has no bundled copy, vlcj's own discovery finds the
-        // system VLC (/usr/lib...) instead.
-        val libraryNames = if (com.recordlabs.desktop.data.Platform.isWindows) listOf("libvlc.dll")
-            else listOf("libvlc.so", "libvlc.so.5")
         val vlcDir = candidates.map(File::getAbsoluteFile).firstOrNull { dir ->
-            dir.isDirectory && libraryNames.any { File(dir, it).isFile }
+            if (!dir.isDirectory) return@firstOrNull false
+            if (isWindows) {
+                File(dir, "libvlc.dll").isFile
+            } else {
+                File(dir, "libvlc.so.5").isFile || File(dir, "libvlc.so").isFile
+            }
         }
 
         if (vlcDir != null) {
@@ -270,17 +277,26 @@ fun ensureJavaFxMediaNatives() {
             NativeLibrary.addSearchPath("libvlccore", vlcDir.absolutePath)
             val pluginsDir = File(vlcDir, "plugins").takeIf { it.isDirectory } ?: vlcDir
             System.setProperty("VLC_PLUGIN_PATH", pluginsDir.absolutePath)
-            if (!com.recordlabs.desktop.data.Platform.isWindows) {
-                // libvlc reads the real environment variable, and a bundled
-                // Linux libvlc would otherwise search its build-time /usr path.
-                runCatching { uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv("VLC_PLUGIN_PATH", pluginsDir.absolutePath, 1) }
-                    .onFailure { logArtwork("setenv VLC_PLUGIN_PATH failed: ${it.message}") }
-            }
             System.setProperty("jna.library.path", vlcDir.absolutePath)
             System.setProperty("jna.load_library_altered_search_path", "true")
             logArtwork("VLC natives configured from: ${vlcDir.absolutePath}")
         } else {
-            logArtwork("VLC natives NOT found! Candidates: ${candidates.joinToString { it.absolutePath }}")
+            if (!isWindows) {
+                val systemLibDir = sequenceOf("/usr/lib64", "/usr/lib/x86_64-linux-gnu", "/usr/lib")
+                    .map(::File).firstOrNull { File(it, "libvlc.so.5").isFile || File(it, "libvlc.so").isFile }
+                if (systemLibDir != null) {
+                    NativeLibrary.addSearchPath("libvlc", systemLibDir.absolutePath)
+                    NativeLibrary.addSearchPath("libvlccore", systemLibDir.absolutePath)
+                }
+                val systemPluginDir = sequenceOf("/usr/lib64/vlc/plugins", "/usr/lib/x86_64-linux-gnu/vlc/plugins", "/usr/lib/vlc/plugins")
+                    .map(::File).firstOrNull { it.isDirectory }
+                if (systemPluginDir != null && System.getProperty("VLC_PLUGIN_PATH").isNullOrBlank()) {
+                    System.setProperty("VLC_PLUGIN_PATH", systemPluginDir.absolutePath)
+                }
+                logArtwork("System Linux VLC configured from: ${systemLibDir?.absolutePath}, plugins: ${systemPluginDir?.absolutePath}")
+            } else {
+                logArtwork("VLC natives NOT found! Candidates: ${candidates.joinToString { it.absolutePath }}")
+            }
         }
     } catch (e: Throwable) {
         logArtwork("ensureJavaFxMediaNatives failed: ${e.stackTraceToString()}")
@@ -605,7 +621,10 @@ internal fun AnimatedTrackArtwork(
                 decoder.onFailed = {
                     // A full-screen video without a picture any more closes.
                     if (showsMusicVideo && MusicVideoFullscreen.trackId == track.id) MusicVideoFullscreen.close()
-                    if (!showsMusicVideo) AnimatedArtworkDiskCache.evict(videoUrl)
+                    if (!showsMusicVideo) {
+                        AnimatedArtworkDiskCache.evict(videoUrl)
+                        WindowsAnimatedArtworkRepository.markFailedStreamUrl(videoUrl)
+                    }
                     streamUrl = null
                     retryTrigger++
                 }
@@ -859,7 +878,6 @@ internal fun MusicVideoFullscreenOverlay(
             modifier = Modifier.align(Alignment.BottomCenter),
         ) {
             androidx.compose.material.MaterialTheme(
-                typography = androidx.compose.material.Typography(defaultFontFamily = AppFonts.family),
                 colors = androidx.compose.material.darkColors(
                     primary = MusicVideoFullscreen.accent,
                     secondary = MusicVideoFullscreen.accent,
@@ -1147,7 +1165,15 @@ private class VlcArtworkFrameDecoder(private val url: String, private val edge: 
         if (released.get()) return
         try {
             ensureJavaFxMediaNatives()
-            val createdFactory = MediaPlayerFactory("--intf=dummy", "--vout=dummy", "--no-audio", "--no-osd", "--avcodec-fast", "--input-repeat=65535")
+            val createdFactory = MediaPlayerFactory(
+                "--intf=dummy",
+                "--vout=dummy",
+                "--no-audio",
+                "--no-osd",
+                "--no-video-title-show",
+                "--no-avcodec-dr",
+                "--drop-late-frames"
+            )
             factory = createdFactory
             val mp = createdFactory.mediaPlayers().newEmbeddedMediaPlayer()
             mediaPlayer = mp
@@ -1155,7 +1181,16 @@ private class VlcArtworkFrameDecoder(private val url: String, private val edge: 
             var firstFrameLogged = false
             mp.videoSurface().set(createdFactory.videoSurfaces().newVideoSurface(object : BufferFormatCallback {
                 override fun getBufferFormat(sourceWidth: Int, sourceHeight: Int): BufferFormat {
-                    return RV32BufferFormat(edge, edge)
+                    if (sourceWidth <= 0 || sourceHeight <= 0) {
+                        return RV32BufferFormat(1080, 1080)
+                    }
+                    val (screenWidth, screenHeight) = largestScreenPixels()
+                    val maxTarget = maxOf(screenWidth, screenHeight, 1080).coerceAtMost(2160)
+                    val longest = maxOf(sourceWidth, sourceHeight)
+                    val scale = if (longest > maxTarget) maxTarget.toFloat() / longest else 1f
+                    val targetWidth = (sourceWidth * scale).roundToInt().coerceAtLeast(1)
+                    val targetHeight = (sourceHeight * scale).roundToInt().coerceAtLeast(1)
+                    return RV32BufferFormat(targetWidth, targetHeight)
                 }
                 override fun allocatedBuffers(buffers: Array<out ByteBuffer>) {}
             }, object : RenderCallback {
@@ -1214,8 +1249,18 @@ private class VlcArtworkFrameDecoder(private val url: String, private val edge: 
                 override fun finished(mediaPlayer: MediaPlayer) {
                     // VLC event thread: never call back into VLC from here.
                     if (!released.get()) runCatching {
-                        worker.execute { if (!released.get()) mp.media().play(resolvedUrl) }
+                        worker.execute {
+                            if (!released.get()) {
+                                logArtwork("VLC artwork finished, looping playback for: $resolvedUrl")
+                                mp.media().play(resolvedUrl)
+                            }
+                        }
                     }
+                }
+
+                override fun error(mediaPlayer: MediaPlayer) {
+                    logArtwork("VLC artwork decoder error for: $resolvedUrl")
+                    if (reportFailures) reportFailure()
                 }
             })
 

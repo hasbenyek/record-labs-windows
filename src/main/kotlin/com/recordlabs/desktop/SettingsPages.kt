@@ -484,6 +484,25 @@ private fun AppearanceSettings() {
     var portraitSize by AppSettings.lyricsTextSizePortrait
     var landscapeSize by AppSettings.lyricsTextSizeLandscape
     var offset by AppSettings.lyricsOffsetMs
+    if (DesktopUiScale.isLinux()) {
+        val displayScale = DesktopUiScale.currentModeState.value
+        SettingsGroup("Display") {
+            SettingChoice(
+                title = "Display scale",
+                subtitle = "Automatic detects optimal scale for your screen (125% on 14\" laptops, 100% on 15.6\"). Changes apply immediately.",
+                options = DesktopUiScale.options,
+                selected = displayScale,
+            ) {
+                DesktopUiScale.saveMode(it)
+            }
+            SettingRow(
+                title = "Restart now",
+                subtitle = "Restart Record Labs to apply display scale to native window decorations",
+                icon = null,
+                onClick = DesktopUiScale::restartWithCurrentScale,
+            )
+        }
+    }
     SettingsGroup("Artwork") {
         SettingToggle("Animated artwork", "Show animated album artwork and music videos when available", animatedArtwork) {
             animatedArtwork = it
@@ -763,8 +782,8 @@ private fun PlayerSettings() {
             listOf("high" to "High", "low" to "Low (saves data)"),
             quality,
         ) { quality = it }
-        SettingToggle("Normalize volume", if (com.recordlabs.desktop.data.Platform.isWindows) "Coming soon on Windows" else "Coming soon on Linux", false, enabled = false) {}
-        SettingToggle("Crossfade", if (com.recordlabs.desktop.data.Platform.isWindows) "Coming soon on Windows" else "Coming soon on Linux", false, enabled = false) {}
+        SettingToggle("Normalize volume", "Coming soon on Windows", false, enabled = false) {}
+        SettingToggle("Crossfade", "Coming soon on Windows", false, enabled = false) {}
     }
     SettingsGroup("Queue") {
         SettingToggle("Autoplay", "Play the next song when one ends", autoplay) { autoplay = it }
@@ -948,7 +967,7 @@ private fun StorageSettings() {
     }
     SettingsGroup("Location") {
         SettingRow("Record Labs data", WindowsStorage.directory.absolutePath, value = "Open folder") {
-            com.recordlabs.desktop.data.Platform.openFolder(WindowsStorage.directory)
+            runCatching { java.awt.Desktop.getDesktop().open(WindowsStorage.directory) }
         }
     }
 }
@@ -1049,7 +1068,7 @@ private fun UpdateSection() {
                 GlassButton(prominent = true, onClick = { AppUpdater.lastInstallProblem.value = null; AppUpdater.download() }) { Text("Update now") }
             } else {
                 // A development run has no installer to replace: offer the release page.
-                GlassButton(prominent = true, onClick = { com.recordlabs.desktop.data.Platform.openUrl(state.release.pageUrl) }) { Text("Open release page") }
+                GlassButton(prominent = true, onClick = { runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI(state.release.pageUrl)) } }) { Text("Open release page") }
             }
         }
         is AppUpdater.State.Downloading -> UpdateCard(
@@ -1113,7 +1132,7 @@ private fun UpdateCard(
 private fun AboutSettings() {
     var showLicenses by remember { mutableStateOf(false) }
     SettingsGroup("About Record Labs") {
-        SettingRow("Version", if (com.recordlabs.desktop.data.Platform.isWindows) "Record Labs for Windows" else "Record Labs for Linux", icon = null, value = AppInfo.version) {}
+        SettingRow("Version", "Record Labs for Windows", icon = null, value = AppInfo.version) {}
         SettingRow("Made by", "Byonkiee", icon = null) {}
         SettingRow("Open source licenses", "Libraries Record Labs is built with") { showLicenses = true }
     }
@@ -1332,7 +1351,7 @@ internal fun LastFmIntegrationPage() {
             DiscordTemplateRow("API key", apiKey, "", maxLength = 64, placeholders = false) { apiKey = it }
             DiscordTemplateRow("Shared secret", if (secret.isBlank()) "" else "••••••••", "", maxLength = 64, placeholders = false, initialText = secret) { secret = it }
             SettingRow("Get an API account", "Opens last.fm in your browser") {
-                com.recordlabs.desktop.data.Platform.openUrl("https://www.last.fm/api/account/create")
+                runCatching { java.awt.Desktop.getDesktop().browse(java.net.URI("https://www.last.fm/api/account/create")) }
             }
         }
         SettingsGroup("Account") {

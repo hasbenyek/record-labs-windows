@@ -4,6 +4,8 @@ import kotlinx.coroutines.runBlocking
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotEquals
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class WindowsAnimatedArtworkRepositoryTest {
@@ -201,5 +203,51 @@ class WindowsAnimatedArtworkRepositoryTest {
             albums.any { it.contains("a cap", ignoreCase = true) },
             "Candidates should reject a cappella album when song title is standard vocal"
         )
+    }
+
+    @Test
+    fun findResolvesCompatibleAvcMp4ForAnimatedArtwork() = runBlocking {
+        val track = Track(
+            id = "test-nonsense",
+            title = "Nonsense",
+            artist = "Sabrina Carpenter",
+            album = "",
+        )
+        val artwork = WindowsAnimatedArtworkRepository.find(track)
+        if (artwork != null) {
+            println("Resolved artwork stream URL: ${artwork.streamUrl}")
+            assertTrue(
+                artwork.streamUrl.endsWith(".mp4", ignoreCase = true) || artwork.streamUrl.contains(".mp4?"),
+                "Expected MP4 URL, got ${artwork.streamUrl}"
+            )
+            if (!WindowsAnimatedArtworkRepository.supportsHevc) {
+                assertTrue(
+                    artwork.streamUrl.contains("gr2"),
+                    "Expected AVC (gr2xx) stream on system without HEVC, got: ${artwork.streamUrl}"
+                )
+            } else {
+                assertTrue(
+                    artwork.streamUrl.contains("gr5") || artwork.streamUrl.contains("gr6") || artwork.streamUrl.contains("gr2"),
+                    "Expected high-res stream, got: ${artwork.streamUrl}"
+                )
+            }
+        }
+    }
+
+    @Test
+    fun testMarkFailedStreamUrlForcesFallback() = runBlocking {
+        val track = Track(
+            id = "test-track-fallback",
+            title = "Fortnight",
+            artist = "Taylor Swift",
+            album = "",
+        )
+        val normal = WindowsAnimatedArtworkRepository.find(track)
+        if (normal != null) {
+            WindowsAnimatedArtworkRepository.markFailedStreamUrl(normal.streamUrl)
+            val fallback = WindowsAnimatedArtworkRepository.find(track)
+            assertNotNull(fallback)
+            assertNotEquals(normal.streamUrl, fallback.streamUrl)
+        }
     }
 }

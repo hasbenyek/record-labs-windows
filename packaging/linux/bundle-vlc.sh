@@ -16,7 +16,19 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 DEST="$ROOT/src/appResources/linux-x64/vlc"
-SRC_LIB="${VLC_LIB_DIR:-/usr/lib/x86_64-linux-gnu}"
+if [ -z "${VLC_LIB_DIR:-}" ]; then
+  if [ -f "/usr/lib64/libvlc.so.5" ]; then
+    SRC_LIB="/usr/lib64"
+  elif [ -f "/usr/lib/x86_64-linux-gnu/libvlc.so.5" ]; then
+    SRC_LIB="/usr/lib/x86_64-linux-gnu"
+  elif [ -f "/usr/lib/libvlc.so.5" ]; then
+    SRC_LIB="/usr/lib"
+  else
+    SRC_LIB="/usr/lib/x86_64-linux-gnu"
+  fi
+else
+  SRC_LIB="$VLC_LIB_DIR"
+fi
 SRC_PLUGINS="$SRC_LIB/vlc/plugins"
 
 [ -f "$SRC_LIB/libvlc.so.5" ] || { echo "libvlc not found in $SRC_LIB (install libvlc-dev vlc-plugin-base)"; exit 1; }

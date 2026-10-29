@@ -24,13 +24,26 @@ object AppFonts {
     }
 
     /**
-     * The lyrics (lyrics page and floating lyrics). Windows keeps Segoe UI; on
-     * Linux they use SF Pro Display when it is installed, else the bundled
-     * Inter Display, a free typeface drawn after it (bold, rounded, tight).
+     * The lyrics (lyrics page and floating lyrics), as chosen in the player /
+     * lyrics page ⋮ menu (AppSettings.lyricsFontStyle). It is Compose state, so
+     * every lyrics view switches at once.
      */
-    val lyrics: FontFamily by lazy {
-        if (Platform.isWindows) FontFamily.Default else runCatching { linuxLyricsFamily() }.getOrDefault(family)
+    val lyrics: FontFamily
+        get() = lyricsFamilyFor(com.recordlabs.desktop.data.AppSettings.lyricsFontStyle.value)
+
+    /** "display" (default, Windows and Linux) or "classic". */
+    fun lyricsFamilyFor(style: String): FontFamily = if (style == "classic") classicLyrics else displayLyrics
+
+    /**
+     * SF Pro Display when it is installed, else the bundled Inter Display, a
+     * free typeface drawn after it (bold, rounded, tight). Same on every OS.
+     */
+    private val displayLyrics: FontFamily by lazy {
+        runCatching { displayLyricsFamily() }.getOrDefault(if (Platform.isWindows) FontFamily.Default else family)
     }
+
+    /** The app's UI face: Segoe UI on Windows, Segoe UI or Selawik on Linux. */
+    private val classicLyrics: FontFamily get() = if (Platform.isWindows) FontFamily.Default else family
 
     /** Which typeface the Linux build ended up with (shown in the self-test). */
     val description: String
@@ -42,7 +55,8 @@ object AppFonts {
 
     val lyricsDescription: String
         get() = when {
-            Platform.isWindows -> "Segoe UI (Windows default)"
+            com.recordlabs.desktop.data.AppSettings.lyricsFontStyle.value == "classic" ->
+                if (Platform.isWindows) "Segoe UI (classic)" else "$description (classic)"
             sfProInstalled -> "SF Pro Display (installed)"
             else -> "Inter Display (bundled)"
         }
@@ -58,7 +72,7 @@ object AppFonts {
     }.getOrDefault(false)
 
     @OptIn(androidx.compose.ui.text.ExperimentalTextApi::class)
-    private fun linuxLyricsFamily(): FontFamily = if (sfProInstalled) {
+    private fun displayLyricsFamily(): FontFamily = if (sfProInstalled) {
         FontFamily(
             SystemFont("SF Pro Display", FontWeight.Normal),
             SystemFont("SF Pro Display", FontWeight.Medium),

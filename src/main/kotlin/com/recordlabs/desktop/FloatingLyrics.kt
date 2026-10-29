@@ -32,6 +32,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.window.WindowDraggableArea
 import androidx.compose.material.Icon
@@ -238,6 +239,34 @@ internal fun getScreenTopologySignature(): String {
     }.getOrDefault("")
 }
 
+internal fun ensureWindowTranslucency(window: java.awt.Window) {
+    runCatching {
+        val gc = window.graphicsConfiguration ?: return
+        if (!gc.isTranslucencyCapable()) {
+            val dev = gc.device ?: return
+            val transGc = dev.configurations.firstOrNull { it.isTranslucencyCapable() }
+            if (transGc != null) {
+                java.awt.EventQueue.invokeLater {
+                    runCatching {
+                        // Toggling from opaque (alpha 255) to transparent (alpha 0) triggers
+                        // java.awt.Window.setBackground's internal translucency configuration switch,
+                        // re-acquiring the 32-bit ARGB visual on the new X11/Xwayland screen device.
+                        window.background = java.awt.Color(0, 0, 0, 255)
+                        window.background = java.awt.Color(0, 0, 0, 0)
+                        (window as? javax.swing.JFrame)?.rootPane?.isOpaque = false
+                        (window as? javax.swing.JFrame)?.contentPane?.let {
+                            (it as? javax.swing.JComponent)?.isOpaque = false
+                            it.background = java.awt.Color(0, 0, 0, 0)
+                        }
+                        window.revalidate()
+                        window.repaint()
+                    }
+                }
+            }
+        }
+    }
+}
+
 internal fun recoverFloatingWindow(window: java.awt.Window, windowState: androidx.compose.ui.window.WindowState) {
     runCatching {
         val currentW = window.width.takeIf { it > 100 } ?: windowState.size.width.value.roundToInt()
@@ -253,18 +282,32 @@ internal fun recoverFloatingWindow(window: java.awt.Window, windowState: android
             WindowsPreferences.saveFloatingLyricsPosition(clampedX.toFloat(), clampedY.toFloat())
         }
 
-        window.isAlwaysOnTop = false
-        window.isAlwaysOnTop = true
-        window.toFront()
+        if (com.recordlabs.desktop.data.Platform.isWindows) {
+            window.isAlwaysOnTop = false
+            window.isAlwaysOnTop = true
+            window.toFront()
 
-        window.background = java.awt.Color(0, 0, 0, 0)
+            window.background = java.awt.Color(0, 0, 0, 0)
 
-        // 1-pixel size nudge forces Skiko / SkiaLayer to re-create its Direct3D/DWM swapchain
-        window.setSize(currentW + 1, currentH)
-        window.setSize(currentW, currentH)
+            // 1-pixel size nudge forces Skiko / SkiaLayer to re-create its Direct3D/DWM swapchain
+            window.setSize(currentW + 1, currentH)
+            window.setSize(currentW, currentH)
 
-        window.revalidate()
-        window.repaint()
+            window.revalidate()
+            window.repaint()
+        } else {
+            ensureWindowTranslucency(window)
+            runCatching {
+                (window as? javax.swing.JFrame)?.rootPane?.isOpaque = false
+                (window as? javax.swing.JFrame)?.contentPane?.let {
+                    (it as? javax.swing.JComponent)?.isOpaque = false
+                    it.background = java.awt.Color(0, 0, 0, 0)
+                }
+            }
+            window.isAlwaysOnTop = false
+            window.isAlwaysOnTop = true
+            window.toFront()
+        }
     }
 }
 
@@ -352,18 +395,26 @@ fun FloatingLyricsWindow(
         undecorated = true,
         transparent = true,
         alwaysOnTop = true,
-        // Linux: a fixed-size window to the window manager (it is resized with
-        // its own handle instead). Tiling window managers float fixed-size
-        // windows rather than squeezing them into a tile, which had left the
-        // lyrics as a thin, unusable strip.
-        resizable = com.recordlabs.desktop.data.Platform.isWindows,
+        resizable = true,
         // Linux window managers give keyboard focus to every window that appears,
         // so the lyrics window took focus away from the app the user had just
         // switched to (on Windows a topmost window shown this way does not).
         // Its buttons, dragging and scrolling still work without focus.
         focusable = com.recordlabs.desktop.data.Platform.isWindows,
     ) {
-        FloatingLyricsWindowBody(track, windowState, initialWidth, initialHeight, onClose)
+        val densityScale = DesktopUiScale.effectiveDensityScale()
+        val baseDensity = androidx.compose.ui.platform.LocalDensity.current
+        val customDensity = remember(baseDensity, densityScale) {
+            androidx.compose.ui.unit.Density(
+                density = baseDensity.density * densityScale,
+                fontScale = baseDensity.fontScale * densityScale
+            )
+        }
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.ui.platform.LocalDensity provides customDensity
+        ) {
+            FloatingLyricsWindowBody(track, windowState, initialWidth, initialHeight, onClose)
+        }
     }
 }
 
@@ -428,25 +479,27 @@ private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody
         }
     }
 
-    // Keep transparency alive when dragged across displays with different scaling factors
+    // Keep transparency alive when dragged across displays with different scaling factors or X11 screen devices
     DisposableEffect(window) {
-        var lastGc = window.graphicsConfiguration
-        val listener = object : ComponentAdapter() {
-            override fun componentMoved(e: ComponentEvent?) {
-                val currentGc = window.graphicsConfiguration
-                if (lastGc != null && currentGc != null && lastGc !== currentGc) {
-                    lastGc = currentGc
-                    runCatching {
-                        window.background = java.awt.Color(0, 0, 0, 0)
-                        window.revalidate()
-                        window.repaint()
-                    }
-                }
+        ensureWindowTranslucency(window)
+
+        val gcListener = java.beans.PropertyChangeListener { evt ->
+            if (evt.propertyName == "graphicsConfiguration") {
+                ensureWindowTranslucency(window)
             }
         }
-        window.addComponentListener(listener)
+        window.addPropertyChangeListener("graphicsConfiguration", gcListener)
+
+        val moveListener = object : ComponentAdapter() {
+            override fun componentMoved(e: ComponentEvent?) {
+                ensureWindowTranslucency(window)
+            }
+        }
+        window.addComponentListener(moveListener)
+
         onDispose {
-            window.removeComponentListener(listener)
+            window.removePropertyChangeListener("graphicsConfiguration", gcListener)
+            window.removeComponentListener(moveListener)
         }
     }
 
@@ -468,8 +521,12 @@ private fun androidx.compose.ui.window.FrameWindowScope.FloatingLyricsWindowBody
         onClose = onClose,
     )
     // Linux window managers can't resize a borderless window, so it gets
-    // its own handle (bottom-right corner). Windows resizes it natively.
+    // its own handle (bottom-right corner) plus interactive border zones. Windows resizes it natively.
     if (!com.recordlabs.desktop.data.Platform.isWindows) {
+        val w = LocalPipWindowScope.current?.window
+        if (w != null) {
+            PipAllResizeBorders(w)
+        }
         PipResizeHandle(Modifier.align(Alignment.BottomEnd))
     }
     }
@@ -618,6 +675,172 @@ private fun PipResizeHandle(modifier: Modifier) {
             }
         }
     }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+private fun PipEdgeResize(
+    modifier: Modifier,
+    window: java.awt.Window,
+    direction: Long,
+    cursorType: Int,
+) {
+    val density = LocalDensity.current.density
+    Box(
+        modifier
+            .pointerHoverIcon(androidx.compose.ui.input.pointer.PointerIcon(java.awt.Cursor(cursorType)))
+            .pointerInput(window) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    val pointer = java.awt.MouseInfo.getPointerInfo()?.location
+                    val scale = window.graphicsConfiguration?.defaultTransform?.scaleX ?: 1.0
+                    val handedOver = pointer != null && LinuxX11Window.beginMoveResize(
+                        window, (pointer.x * scale).roundToInt(), (pointer.y * scale).roundToInt(), direction,
+                    )
+                    if (handedOver) return@awaitEachGesture
+
+                    val startLoc = window.location
+                    val startW = window.width.toFloat()
+                    val startH = window.height.toFloat()
+                    var totalDragX = 0f
+                    var totalDragY = 0f
+
+                    drag(down.id) { change ->
+                        val delta = change.positionChange()
+                        change.consume()
+                        totalDragX += delta.x / density
+                        totalDragY += delta.y / density
+
+                        var newX = startLoc.x
+                        var newY = startLoc.y
+                        var newW = startW
+                        var newH = startH
+
+                        when (direction) {
+                            LinuxX11Window.SIZE_RIGHT -> {
+                                newW = (startW + totalDragX).coerceAtLeast(PIP_MIN_WIDTH)
+                            }
+                            LinuxX11Window.SIZE_LEFT -> {
+                                val potentialW = (startW - totalDragX).coerceAtLeast(PIP_MIN_WIDTH)
+                                val appliedDelta = startW - potentialW
+                                newX = (startLoc.x + appliedDelta).roundToInt()
+                                newW = potentialW
+                            }
+                            LinuxX11Window.SIZE_BOTTOM -> {
+                                newH = (startH + totalDragY).coerceAtLeast(PIP_MIN_HEIGHT)
+                            }
+                            LinuxX11Window.SIZE_TOP -> {
+                                val potentialH = (startH - totalDragY).coerceAtLeast(PIP_MIN_HEIGHT)
+                                val appliedDelta = startH - potentialH
+                                newY = (startLoc.y + appliedDelta).roundToInt()
+                                newH = potentialH
+                            }
+                            LinuxX11Window.SIZE_TOP_LEFT -> {
+                                val potW = (startW - totalDragX).coerceAtLeast(PIP_MIN_WIDTH)
+                                val potH = (startH - totalDragY).coerceAtLeast(PIP_MIN_HEIGHT)
+                                newX = (startLoc.x + (startW - potW)).roundToInt()
+                                newY = (startLoc.y + (startH - potH)).roundToInt()
+                                newW = potW
+                                newH = potH
+                            }
+                            LinuxX11Window.SIZE_TOP_RIGHT -> {
+                                val potH = (startH - totalDragY).coerceAtLeast(PIP_MIN_HEIGHT)
+                                newY = (startLoc.y + (startH - potH)).roundToInt()
+                                newW = (startW + totalDragX).coerceAtLeast(PIP_MIN_WIDTH)
+                                newH = potH
+                            }
+                            LinuxX11Window.SIZE_BOTTOM_LEFT -> {
+                                val potW = (startW - totalDragX).coerceAtLeast(PIP_MIN_WIDTH)
+                                newX = (startLoc.x + (startW - potW)).roundToInt()
+                                newW = potW
+                                newH = (startH + totalDragY).coerceAtLeast(PIP_MIN_HEIGHT)
+                            }
+                        }
+
+                        if (newX != window.x || newY != window.y) {
+                            window.setLocation(newX, newY)
+                        }
+                        window.setSize(newW.roundToInt(), newH.roundToInt())
+                    }
+                }
+            }
+    )
+}
+
+@Composable
+private fun androidx.compose.foundation.layout.BoxScope.PipAllResizeBorders(window: java.awt.Window) {
+    val borderThickness = 6.dp
+    val cornerSize = 14.dp
+
+    // Top edge
+    PipEdgeResize(
+        Modifier
+            .fillMaxWidth()
+            .height(borderThickness)
+            .padding(horizontal = cornerSize)
+            .align(Alignment.TopCenter),
+        window,
+        LinuxX11Window.SIZE_TOP,
+        java.awt.Cursor.N_RESIZE_CURSOR
+    )
+    // Bottom edge
+    PipEdgeResize(
+        Modifier
+            .fillMaxWidth()
+            .height(borderThickness)
+            .padding(horizontal = cornerSize)
+            .align(Alignment.BottomCenter),
+        window,
+        LinuxX11Window.SIZE_BOTTOM,
+        java.awt.Cursor.S_RESIZE_CURSOR
+    )
+    // Left edge
+    PipEdgeResize(
+        Modifier
+            .fillMaxHeight()
+            .width(borderThickness)
+            .padding(vertical = cornerSize)
+            .align(Alignment.CenterStart),
+        window,
+        LinuxX11Window.SIZE_LEFT,
+        java.awt.Cursor.W_RESIZE_CURSOR
+    )
+    // Right edge
+    PipEdgeResize(
+        Modifier
+            .fillMaxHeight()
+            .width(borderThickness)
+            .padding(vertical = cornerSize)
+            .align(Alignment.CenterEnd),
+        window,
+        LinuxX11Window.SIZE_RIGHT,
+        java.awt.Cursor.E_RESIZE_CURSOR
+    )
+    // Corners
+    PipEdgeResize(
+        Modifier
+            .size(cornerSize)
+            .align(Alignment.TopStart),
+        window,
+        LinuxX11Window.SIZE_TOP_LEFT,
+        java.awt.Cursor.NW_RESIZE_CURSOR
+    )
+    PipEdgeResize(
+        Modifier
+            .size(cornerSize)
+            .align(Alignment.TopEnd),
+        window,
+        LinuxX11Window.SIZE_TOP_RIGHT,
+        java.awt.Cursor.NE_RESIZE_CURSOR
+    )
+    PipEdgeResize(
+        Modifier
+            .size(cornerSize)
+            .align(Alignment.BottomStart),
+        window,
+        LinuxX11Window.SIZE_BOTTOM_LEFT,
+        java.awt.Cursor.SW_RESIZE_CURSOR
+    )
 }
 
 @OptIn(ExperimentalComposeUiApi::class)
@@ -899,9 +1122,7 @@ fun FloatingLyricsContent(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .offset { IntOffset(0, relY.roundToInt()) }
-                                // Linux fades the cached line image itself (LocalPipLineAlpha): a
-                                // fading layer here cut the dimmed lines' shadows into hard bands.
-                                .then(if (com.recordlabs.desktop.data.Platform.isWindows) Modifier.graphicsLayer { alpha = animatedAlpha } else Modifier)
+                                .graphicsLayer { alpha = animatedAlpha }
                                 .onSizeChanged { itemHeights[index] = it.height }
                                 .clickable(
                                     interactionSource = remember { MutableInteractionSource() },
@@ -914,7 +1135,6 @@ fun FloatingLyricsContent(
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
-                            androidx.compose.runtime.CompositionLocalProvider(LocalPipLineAlpha provides animatedAlpha) {
                             NetflixSubtitleKaraokeLine(
                                 line = vocalLines[index],
                                 isActive = isCenterLine,
@@ -926,7 +1146,6 @@ fun FloatingLyricsContent(
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.fillMaxWidth(0.92f),
                             )
-                            }
                         }
                     }
                 }
@@ -1096,135 +1315,76 @@ fun NetflixSubtitleText(
     modifier: Modifier = Modifier,
 ) {
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        if (!com.recordlabs.desktop.data.Platform.isWindows) {
-            CachedShadowText(text, fontSize, TextUnit.Unspecified, fontWeight, textColor.copy(alpha = alpha), fillWidth = false)
-        } else {
-            // Layer 1: Extra wide ambient diffuse halo
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = text,
-                fontSize = fontSize,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = Color.Black.copy(alpha = 0.95f),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.95f),
-                        offset = Offset(0f, 2.5f),
-                        blurRadius = 22f,
-                    ),
+        // Layer 1: Extra wide ambient diffuse halo
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = text,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = Color.Black.copy(alpha = 0.95f),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.95f),
+                    offset = Offset(0f, 2.5f),
+                    blurRadius = 22f,
                 ),
-            )
-            // Layer 2: Medium ambient spreading shadow
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = text,
-                fontSize = fontSize,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = Color.Black.copy(alpha = 0.92f),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.92f),
-                        offset = Offset(0f, 1.5f),
-                        blurRadius = 12f,
-                    ),
+            ),
+        )
+        // Layer 2: Medium ambient spreading shadow
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = text,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = Color.Black.copy(alpha = 0.92f),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.92f),
+                    offset = Offset(0f, 1.5f),
+                    blurRadius = 12f,
                 ),
-            )
-            // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = text,
-                fontSize = fontSize,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = Color.Black.copy(alpha = 0.90f),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.90f),
-                        offset = Offset(0f, 0f),
-                        blurRadius = 4f,
-                    ),
+            ),
+        )
+        // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = text,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = Color.Black.copy(alpha = 0.90f),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.90f),
+                    offset = Offset(0f, 0f),
+                    blurRadius = 4f,
                 ),
-            )
-            // Layer 4: Foreground crisp white text
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = text,
-                fontSize = fontSize,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = textColor.copy(alpha = alpha),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.85f),
-                        offset = Offset(0f, 1f),
-                        blurRadius = 2f,
-                    ),
+            ),
+        )
+        // Layer 4: Foreground crisp white text
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = text,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = textColor.copy(alpha = alpha),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.85f),
+                    offset = Offset(0f, 1f),
+                    blurRadius = 2f,
                 ),
-            )
-        }
+            ),
+        )
     }
 }
-
-/**
- * The lyric shadow layers (wide halo, soft shadow, contour, base text) drawn
- * once into a bitmap and then only copied. Each layer is a blurred text draw;
- * redrawing all four every frame made the floating lyrics stutter on Linux.
- */
-@Composable
-private fun CachedShadowText(
-    text: String,
-    fontSize: TextUnit,
-    lineHeight: TextUnit,
-    fontWeight: FontWeight,
-    color: Color,
-    fillWidth: Boolean,
-) {
-    val measurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 8)
-    val density = LocalDensity.current
-    BoxWithConstraints(if (fillWidth) Modifier.fillMaxWidth() else Modifier) {
-        val maxWidth = constraints.maxWidth
-        val layout = remember(text, fontSize, lineHeight, fontWeight, maxWidth, density) {
-            measurer.measure(
-                text = androidx.compose.ui.text.AnnotatedString(text),
-                style = TextStyle(fontFamily = AppFonts.lyrics, fontSize = fontSize, lineHeight = lineHeight, fontWeight = fontWeight, textAlign = TextAlign.Center),
-                constraints = if (fillWidth) androidx.compose.ui.unit.Constraints.fixedWidth(maxWidth) else androidx.compose.ui.unit.Constraints(maxWidth = maxWidth),
-                density = density,
-            )
-        }
-        val bitmap = remember(layout, color) {
-            val pad = SHADOW_PAD
-            val image = androidx.compose.ui.graphics.ImageBitmap(layout.size.width + 2 * pad, layout.size.height + 2 * pad)
-            androidx.compose.ui.graphics.drawscope.CanvasDrawScope().draw(
-                density, androidx.compose.ui.unit.LayoutDirection.Ltr, androidx.compose.ui.graphics.Canvas(image),
-                Size(image.width.toFloat(), image.height.toFloat()),
-            ) {
-                val at = Offset(pad.toFloat(), pad.toFloat())
-                drawText(layout, color = Color.Black.copy(alpha = 0.95f), topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.95f), Offset(0f, 2.5f), 22f))
-                drawText(layout, color = Color.Black.copy(alpha = 0.92f), topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.92f), Offset(0f, 1.5f), 12f))
-                drawText(layout, color = Color.Black.copy(alpha = 0.90f), topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.90f), Offset.Zero, 4f))
-                drawText(layout, color = color, topLeft = at, shadow = Shadow(Color.Black.copy(alpha = 0.85f), Offset(0f, 1f), 2f))
-            }
-            image
-        }
-        val lineAlpha = LocalPipLineAlpha.current
-        val widthDp = with(density) { layout.size.width.toDp() }
-        val heightDp = with(density) { layout.size.height.toDp() }
-        androidx.compose.foundation.Canvas(Modifier.size(widthDp, heightDp)) {
-            drawImage(bitmap, topLeft = Offset(-SHADOW_PAD.toFloat(), -SHADOW_PAD.toFloat()), alpha = lineAlpha)
-        }
-    }
-}
-
-private const val SHADOW_PAD = 80
-
-/** Opacity of the lyric line being drawn (Linux draws it into the cached line image). */
-private val LocalPipLineAlpha = androidx.compose.runtime.compositionLocalOf { 1f }
 
 @Composable
 private fun smoothPlaybackClock(
@@ -1328,89 +1488,83 @@ fun NetflixSubtitleKaraokeLine(
     val baseTextColor = if (isActive) Color(0xFFB8B8B8) else Color(0xFFA0A0A0)
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
-        if (!com.recordlabs.desktop.data.Platform.isWindows) {
-            // Linux: the four shadow layers drawn once into a bitmap (blurs are
-            // expensive without a GPU); only the sung highlight is drawn each frame.
-            CachedShadowText(plain, fontSize, lineHeight, fontWeight, baseTextColor, fillWidth = true)
-        } else {
-            // Layer 1: Extra wide ambient diffuse halo
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = plain,
-                fontSize = fontSize,
-                lineHeight = lineHeight,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = Color.Black.copy(alpha = 0.95f),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.95f),
-                        offset = Offset(0f, 2.5f),
-                        blurRadius = 22f,
-                    ),
+        // Layer 1: Extra wide ambient diffuse halo
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = plain,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = Color.Black.copy(alpha = 0.95f),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.95f),
+                    offset = Offset(0f, 2.5f),
+                    blurRadius = 22f,
                 ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // Layer 2: Medium ambient spreading shadow
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = plain,
-                fontSize = fontSize,
-                lineHeight = lineHeight,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = Color.Black.copy(alpha = 0.92f),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.92f),
-                        offset = Offset(0f, 1.5f),
-                        blurRadius = 12f,
-                    ),
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        // Layer 2: Medium ambient spreading shadow
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = plain,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = Color.Black.copy(alpha = 0.92f),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.92f),
+                    offset = Offset(0f, 1.5f),
+                    blurRadius = 12f,
                 ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = plain,
-                fontSize = fontSize,
-                lineHeight = lineHeight,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = Color.Black.copy(alpha = 0.90f),
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.90f),
-                        offset = Offset(0f, 0f),
-                        blurRadius = 4f,
-                    ),
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        // Layer 3: Tight contour outline shadow (for crisp stroke and edge definition)
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = plain,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = Color.Black.copy(alpha = 0.90f),
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.90f),
+                    offset = Offset(0f, 0f),
+                    blurRadius = 4f,
                 ),
-                modifier = Modifier.fillMaxWidth(),
-            )
-            // Layer 4: Base foreground gray text
-            Text(
-                fontFamily = AppFonts.lyrics,
-                text = plain,
-                fontSize = fontSize,
-                lineHeight = lineHeight,
-                fontWeight = fontWeight,
-                textAlign = TextAlign.Center,
-                softWrap = true,
-                color = baseTextColor,
-                style = TextStyle(
-                    shadow = Shadow(
-                        color = Color.Black.copy(alpha = 0.85f),
-                        offset = Offset(0f, 1f),
-                        blurRadius = 2f,
-                    ),
+            ),
+            modifier = Modifier.fillMaxWidth(),
+        )
+        // Layer 4: Base foreground gray text
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = plain,
+            fontSize = fontSize,
+            lineHeight = lineHeight,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = baseTextColor,
+            style = TextStyle(
+                shadow = Shadow(
+                    color = Color.Black.copy(alpha = 0.85f),
+                    offset = Offset(0f, 1f),
+                    blurRadius = 2f,
                 ),
-                onTextLayout = { textLayoutResult = it },
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
+            ),
+            onTextLayout = { textLayoutResult = it },
+            modifier = Modifier.fillMaxWidth(),
+        )
 
         // Layer 5: Active white highlight text (pure white, no glow/cahaya, smooth soft-edge wipe)
         if (isActive) {
@@ -1425,7 +1579,7 @@ fun NetflixSubtitleKaraokeLine(
                         textAlign = TextAlign.Center,
                         softWrap = true,
                         color = Color.White,
-                        onTextLayout = { if (!com.recordlabs.desktop.data.Platform.isWindows) textLayoutResult = it },
+                        onTextLayout = { textLayoutResult = it },
                         modifier = Modifier
                             .fillMaxWidth()
                             .drawWithContent {

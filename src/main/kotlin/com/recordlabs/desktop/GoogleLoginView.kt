@@ -145,30 +145,9 @@ internal object BrowserGoogleLogin {
     private val json = Json { ignoreUnknownKeys = true }
     private val client = OkHttpClient.Builder().callTimeout(8, TimeUnit.SECONDS).build()
 
-    /** Google's sign-in page, returning to YouTube Music (overridable for tests with -Drecordlabs.loginUrl). */
-    private val startUrl: String
-        get() = System.getProperty("recordlabs.loginUrl")?.takeIf(String::isNotBlank)
-            ?: "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com"
-
-    /** The page that means "signed in"; follows the test page's origin when one is set. */
-    private val musicPagePrefix: String
-        get() = System.getProperty("recordlabs.loginUrl")?.takeIf(String::isNotBlank)
-            ?.let { java.net.URI(it).let { uri -> "${uri.scheme}://${uri.host}" } }
-            ?: "https://music.youtube.com"
-
-    suspend fun login(onProgress: (String) -> Unit): Result<Unit> {
-        if (!com.recordlabs.desktop.data.Platform.isWindows) {
-            // Linux: the user's default browser first (Firefox included), like Windows.
-            val browser = LinuxLoginBrowser.find()
-                ?: return Result.failure(IllegalStateException("Tidak ada browser yang bisa dipakai untuk login. Pasang Firefox, Chrome, Chromium atau Brave."))
-            onProgress("Membuka ${browser.name}…")
-            return if (browser.engine == LinuxLoginBrowser.Engine.Firefox) {
-                LinuxFirefoxLogin.login(browser, startUrl, onProgress)
-            } else {
-                chromiumLogin(browser.command, browser.newProfileDir(), onProgress)
-            }
-        }
-        val browser = findBrowser() ?: return Result.failure(IllegalStateException("Browser berbasis Chromium tidak ditemukan."))
+    suspend fun login(onProgress: (String) -> Unit): Result<Unit> = runCatching {
+        val browser = findBrowser() ?: error("Browser berbasis Chromium tidak ditemukan.")
+        val port = ServerSocket(0).use { it.localPort }
         // A unique non-default profile guarantees that Chromium does not hand
         // the URL to an already-running normal browser instance. When that
         // happened, the user could sign in successfully while Record Labs was
@@ -178,14 +157,8 @@ internal object BrowserGoogleLogin {
             "RecordLabs/GoogleLoginBrowser",
         ).apply { mkdirs() }
         val profile = File(profileRoot, "Attempt-${UUID.randomUUID()}").apply { mkdirs() }
-        return chromiumLogin(listOf(browser.absolutePath), profile, onProgress)
-    }
-
-    /** Chromium-family login: isolated profile + DevTools port, cookies read over CDP. */
-    private suspend fun chromiumLogin(command: List<String>, profile: File, onProgress: (String) -> Unit): Result<Unit> = runCatching {
-        val port = ServerSocket(0).use { it.localPort }
         val process = ProcessBuilder(
-            command + listOf(
+            browser.absolutePath,
             "--user-data-dir=${profile.absolutePath}",
             "--remote-debugging-port=$port",
             "--remote-debugging-address=127.0.0.1",
@@ -197,8 +170,7 @@ internal object BrowserGoogleLogin {
             // page and redirects to YouTube Music only as the completion
             // handshake. Record Labs captures that session, closes this
             // isolated browser and returns focus to the desktop app.
-            startUrl,
-            ),
+            "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com",
         ).start()
 
         try {
@@ -219,7 +191,7 @@ internal object BrowserGoogleLogin {
                 val musicTarget = targets
                     .firstOrNull {
                         it["url"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                            .startsWith(musicPagePrefix)
+                            .startsWith("https://music.youtube.com")
                     }
                 musicPageSeen = musicPageSeen || musicTarget != null
                 val webSocketUrl = musicTarget?.get("webSocketDebuggerUrl")?.jsonPrimitive?.contentOrNull
@@ -297,8 +269,6 @@ internal object BrowserGoogleLogin {
                 }
             }
             if (process.isAlive) process.destroy()
-            // Snap/Flatpak browsers run outside this process tree.
-            if (!com.recordlabs.desktop.data.Platform.isWindows) LinuxLoginBrowser.killProfileProcesses(profile)
             runCatching {
                 profile.walkBottomUp().forEach { file ->
                     if (!file.delete()) file.deleteOnExit()
@@ -367,6 +337,21 @@ internal object BrowserGoogleLogin {
 
     private fun findBrowser(): File? {
         findWindowsDefaultBrowser()?.takeIf(File::isFile)?.let { return it }
+        if (System.getProperty("os.name").lowercase().contains("linux")) {
+            val candidates = listOf(
+                "google-chrome-stable", "google-chrome", "chromium", "chromium-browser",
+                "brave-browser", "microsoft-edge", "vivaldi",
+            )
+            return candidates.firstNotNullOfOrNull { command ->
+                runCatching {
+                    val process = ProcessBuilder("sh", "-lc", "command -v $command")
+                        .redirectErrorStream(true)
+                        .start()
+                    val path = process.inputStream.bufferedReader().use { it.readText().trim() }
+                    if (process.waitFor() == 0) File(path).takeIf(File::isFile) else null
+                }.getOrNull()
+            }
+        }
         val roots = listOfNotNull(
             System.getenv("ProgramFiles(x86)"),
             System.getenv("ProgramFiles"),

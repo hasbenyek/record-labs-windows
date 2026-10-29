@@ -62,8 +62,15 @@ internal object LinuxX11Window {
     } ?: false
 
     /** _NET_WM_MOVERESIZE directions. */
-    const val MOVE = 8L
+    const val SIZE_TOP_LEFT = 0L
+    const val SIZE_TOP = 1L
+    const val SIZE_TOP_RIGHT = 2L
+    const val SIZE_RIGHT = 3L
     const val SIZE_BOTTOM_RIGHT = 4L
+    const val SIZE_BOTTOM = 5L
+    const val SIZE_BOTTOM_LEFT = 6L
+    const val SIZE_LEFT = 7L
+    const val MOVE = 8L
 
     /**
      * Lets the window manager move (or resize) [window] with the pointer, as when

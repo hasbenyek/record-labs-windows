@@ -34,10 +34,6 @@ data class WindowsPlaybackSnapshot(
 /**
  * Controller for the bundled Windows Media Foundation helper.
  * Commands are serialized off the Compose UI thread and query values are URL encoded.
- *
- * On Linux there is no Windows helper: the same commands go to
- * [VlcPlayerBackend] inside this process, which answers with the same status
- * JSON, so everything below behaves the same on both systems.
  */
 class WindowsMediaPlayer {
     @Volatile var isPlaying: Boolean = false
@@ -73,16 +69,9 @@ class WindowsMediaPlayer {
         Thread(runnable, "record-labs-native-player-commands").apply { isDaemon = true }
     }
 
-    /** In-process engine for systems without the Windows helper (Linux). Null on Windows. */
-    private val inProcessBackend: VlcPlayerBackend? = if (Platform.isWindows) null else VlcPlayerBackend()
-
-    /** Media keys/desktop controls on Linux (MPRIS) report through the same channel as the Windows helper. */
-    internal fun emitExternalCommand(command: String) {
-        inProcessBackend?.emitExternalCommand(command)
-    }
-
     @Volatile private var process: Process? = null
     @Volatile private var port = 0
+    @Volatile private var vlcBackend: VlcPlayerBackend? = null
     @Volatile private var pollingThread: Thread? = null
     @Volatile private var isPendingPlay = false
     @Volatile private var desiredPlaying = false
@@ -98,7 +87,7 @@ class WindowsMediaPlayer {
     init {
         pollingThread = thread(isDaemon = true, name = "record-labs-native-player-status") {
             while (!Thread.currentThread().isInterrupted && !released) {
-                if (process?.isAlive == true || inProcessBackend?.isStarted == true) pollStatus()
+                if (process?.isAlive == true || vlcBackend?.isStarted == true) pollStatus()
                 try {
                     // While a new source is opening, notice "ready"/first position
                     // quickly so the loading state clears as soon as audio starts.
@@ -113,14 +102,21 @@ class WindowsMediaPlayer {
 
     private fun ensureStarted(): Boolean = synchronized(lifecycleLock) {
         if (released) return@synchronized false
-        inProcessBackend?.let { backend ->
-            if (backend.start()) {
-                lastError = null
-                return@synchronized true
+        if (!Platform.isWindows) {
+            val backend = vlcBackend ?: VlcPlayerBackend().also { vlcBackend = it }
+            if (backend.isStarted) return@synchronized true
+            if (!backend.start()) {
+                val errorMsg = runCatching {
+                    val statusJson = backend.handle("status", emptyMap())
+                    json.decodeFromString<JsonObject>(statusJson)["Error"]?.jsonPrimitive?.contentOrNull
+                }.getOrNull() ?: "VLC belum terinstal atau tidak bisa dimuat."
+                fail("$errorMsg Pastikan paket VLC terinstal di sistem Anda (contoh: dnf/apt/pacman install vlc).")
+                return@synchronized false
             }
-            fail("Pemutar audio (VLC) tidak bisa dijalankan. Instal ulang Record Labs.")
-            return@synchronized false
+            lastError = null
+            return@synchronized true
         }
+
         if (port > 0 && process?.isAlive == true && request("status", targetPort = port, failSilently = true) != null) {
             return@synchronized true
         }
@@ -400,12 +396,16 @@ class WindowsMediaPlayer {
         isReady = false
         pollingThread?.interrupt()
         pollingThread = null
-        inProcessBackend?.let { runCatching { it.shutdown() } }
-        runCatching { request("exit", failSilently = true) }
-        runCatching { process?.waitFor(500, TimeUnit.MILLISECONDS) }
-        runCatching { if (process?.isAlive == true) process?.destroyForcibly() }
-        process = null
-        port = 0
+        if (!Platform.isWindows) {
+            vlcBackend?.shutdown()
+            vlcBackend = null
+        } else {
+            runCatching { request("exit", failSilently = true) }
+            runCatching { process?.waitFor(500, TimeUnit.MILLISECONDS) }
+            runCatching { if (process?.isAlive == true) process?.destroyForcibly() }
+            process = null
+            port = 0
+        }
         commandExecutor.shutdownNow()
         client.dispatcher.executorService.shutdown()
         client.connectionPool.evictAll()
@@ -417,12 +417,12 @@ class WindowsMediaPlayer {
         targetPort: Int = port,
         failSilently: Boolean = false,
     ): String? {
-        inProcessBackend?.let { backend ->
-            if (!backend.isStarted) return null
+        if (!Platform.isWindows) {
+            val backend = vlcBackend ?: return null
             return try {
                 backend.handle(path, parameters)
             } catch (error: Exception) {
-                if (!failSilently) throw IOException(error.message ?: "player tidak merespons", error)
+                if (!failSilently) throw error
                 null
             }
         }

@@ -46,4 +46,52 @@ class FloatingLyricsMultiMonitorTest {
         assertEquals(targetX, clampedX)
         assertEquals(targetY, clampedY)
     }
+
+    @Test
+    fun testEnsureWindowTranslucencyDoesNotThrow() {
+        val f = javax.swing.JFrame()
+        f.isUndecorated = true
+        f.background = java.awt.Color(0, 0, 0, 0)
+        f.setSize(200, 100)
+        ensureWindowTranslucency(f)
+        f.dispose()
+    }
+
+    @Test
+    fun testWindowTranslucencyAcrossMultiMonitors() {
+        val ge = java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment()
+        val screens = ge.screenDevices
+        if (screens.size < 2) return
+
+        val f = javax.swing.JFrame()
+        f.isUndecorated = true
+        f.background = java.awt.Color(0, 0, 0, 0)
+        f.setSize(300, 200)
+        f.setLocation(100, 100)
+
+        val propListener = java.beans.PropertyChangeListener { evt ->
+            if (evt.propertyName == "graphicsConfiguration") {
+                ensureWindowTranslucency(f)
+            }
+        }
+        f.addPropertyChangeListener("graphicsConfiguration", propListener)
+        f.isVisible = true
+
+        Thread.sleep(800)
+        assertTrue(f.graphicsConfiguration?.isTranslucencyCapable() == true, "Screen 0 must be translucent initially")
+
+        // Move to screen 1
+        val screen1Bounds = screens[1].defaultConfiguration.bounds
+        f.setLocation(screen1Bounds.x + 100, screen1Bounds.y + 100)
+        Thread.sleep(1000)
+
+        assertTrue(f.graphicsConfiguration?.isTranslucencyCapable() == true, "Screen 1 must be translucent after move")
+
+        // Move back to screen 0
+        f.setLocation(100, 100)
+        Thread.sleep(1000)
+
+        assertTrue(f.graphicsConfiguration?.isTranslucencyCapable() == true, "Screen 0 must be translucent after moving back")
+        f.dispose()
+    }
 }

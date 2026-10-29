@@ -37,16 +37,6 @@ import java.time.Duration
  * either when Record Labs is closed, or straight away with "Restart to update",
  * which also opens Record Labs again afterwards. The installer is given the
  * current install folder, so the app (and its data) stay where they are.
- *
- * Linux: the app looks for the file matching how it was installed (the
- * package type is written into the package by packaging/linux/package.sh):
- * an AppImage replaces itself (no password); a .deb/.rpm is installed after
- * the app closes with pkexec (the system password dialog) through apt, dnf or
- * zypper. Arch (AUR) installs are updated by the AUR, not by the app.
- *
- * Several recent releases are read, and the newest one that carries a file
- * for this system wins, so a Linux-only release never hides a Windows update
- * (or the other way round).
  */
 object AppUpdater {
     /**
@@ -126,8 +116,7 @@ object AppUpdater {
                 val code = result.substringAfter(' ', "").trim().toIntOrNull()
                 // 0 = done, 3010 = done but Windows wants a restart.
                 if (compareVersions(target, AppInfo.version) > 0 && code != null && code != 0 && code != 3010) {
-                    // 1602/1223: Windows installer cancelled; 126/127: pkexec password dialog dismissed/denied.
-                    lastInstallProblem.value = if (code == 1602 || code == 1223 || (!Platform.isWindows && (code == 126 || code == 127))) {
+                    lastInstallProblem.value = if (code == 1602 || code == 1223) {
                         "The update to $target was cancelled."
                     } else "The update to $target didn't finish (code $code). Try again from here."
                 }
@@ -143,8 +132,6 @@ object AppUpdater {
     /** Looks for a newer release. [manual] shows "Checking…" and reports problems. */
     suspend fun check(manual: Boolean) {
         if (!configured) return
-        // Linux: only AppImage, .deb and .rpm installs update themselves.
-        if (!Platform.isWindows && linuxUpdateKind == null) return
         checkLock.withLock {
             val before = state.value
             // A download in progress or a ready installer is left alone.
@@ -264,31 +251,22 @@ object AppUpdater {
 
     // ---- internals ----
 
-    /**
-     * How this Linux installation updates: "appimage", "deb" or "rpm"; null
-     * when the app can't update itself (Arch/AUR, plain tarball, development run).
-     */
-    internal val linuxUpdateKind: String?
-        get() {
-            if (Platform.isWindows) return null
-            System.getProperty("recordlabs.packageType")?.takeIf(String::isNotBlank)?.let { return it.lowercase().takeIf { kind -> kind in setOf("appimage", "deb", "rpm") } }
-            if (Platform.appImagePath != null) return "appimage"
-            val resources = System.getProperty("compose.application.resources.dir") ?: return null
-            val marker = File(File(resources).parentFile, "package-type")
-            return marker.takeIf(File::isFile)?.readText()?.trim()?.lowercase()?.takeIf { it in setOf("deb", "rpm") }
-        }
-
-    /** Does this release file fit the running system? */
-    private fun assetFits(name: String): Boolean = when {
-        Platform.isWindows -> name.endsWith(".msi", ignoreCase = true) || name.endsWith(".exe", ignoreCase = true)
-        linuxUpdateKind == "appimage" -> name.endsWith("x86_64.AppImage")
-        linuxUpdateKind == "deb" -> name.endsWith("_amd64.deb")
-        linuxUpdateKind == "rpm" -> name.endsWith(".x86_64.rpm")
-        else -> false
+    fun currentPackageType(): String {
+        System.getProperty("recordlabs.packageType")?.takeIf(String::isNotBlank)?.let { return it.lowercase() }
+        if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) return "msi"
+        if (System.getenv("APPIMAGE") != null) return "appimage"
+        if (File("/etc/debian_version").isFile) return "deb"
+        if (File("/etc/fedora-release").isFile || File("/etc/redhat-release").isFile || File("/etc/SuSE-release").isFile || File("/etc/zypp").isDirectory) return "rpm"
+        return "rpm"
     }
 
     private fun fetchLatest(): Release? {
-        val request = HttpRequest.newBuilder(URI("$apiBase/repos/$repository/releases?per_page=15"))
+        val uri = if (apiBase.endsWith("/releases") || apiBase.endsWith("/releases/latest") || apiBase.endsWith("/")) {
+            URI(apiBase)
+        } else {
+            URI("$apiBase/repos/$repository/releases")
+        }
+        val request = HttpRequest.newBuilder(uri)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", "RecordLabs/${AppInfo.version}")
             .timeout(Duration.ofSeconds(20))
@@ -298,39 +276,52 @@ object AppUpdater {
         // 404: the repository has no published release yet.
         if (response.statusCode() == 404) return null
         if (response.statusCode() !in 200..299) error("HTTP ${response.statusCode()}")
-        fun kotlinx.serialization.json.JsonObject.text(key: String) = this[key]?.jsonPrimitive?.contentOrNull
-        fun nameOf(asset: kotlinx.serialization.json.JsonObject) = asset.text("name").orEmpty()
-        // Newest published release (no drafts / pre-releases) that has a file for this system.
-        val (json, version, asset) = Json.parseToJsonElement(response.body()).jsonArray
-            .map { it.jsonObject }
-            .filter { it.text("draft") != "true" && it.text("prerelease") != "true" }
-            .mapNotNull { release ->
-                val version = release.text("tag_name")?.trim()?.removePrefix("v")?.removePrefix("V") ?: return@mapNotNull null
-                if (parseVersion(version).isEmpty()) return@mapNotNull null
-                val assets = release["assets"]?.jsonArray?.map { it.jsonObject }.orEmpty().filter { assetFits(nameOf(it)) }
-                // Windows: the .msi upgrades in place quietly; an .exe installer is the fallback.
-                val asset = assets.firstOrNull { nameOf(it).endsWith(".msi", ignoreCase = true) } ?: assets.firstOrNull()
-                    ?: return@mapNotNull null
-                Triple(release, version, asset)
-            }
-            .maxWithOrNull { a, b -> compareVersions(a.second, b.second) }
-            ?: return null
-        val url = asset["browser_download_url"]?.jsonPrimitive?.contentOrNull ?: return null
-        val originalName = nameOf(asset)
-        val extension = when {
-            originalName.endsWith(".AppImage") -> "AppImage"
-            else -> originalName.substringAfterLast('.', "msi").lowercase()
+        val jsonElement = Json.parseToJsonElement(response.body())
+        val releasesArray = when (jsonElement) {
+            is kotlinx.serialization.json.JsonArray -> jsonElement.map { it.jsonObject }
+            is kotlinx.serialization.json.JsonObject -> listOf(jsonElement)
+            else -> return null
         }
-        return Release(
-            version = version,
-            notes = json["body"]?.jsonPrimitive?.contentOrNull.orEmpty().trim(),
-            downloadUrl = url,
-            fileName = "RecordLabs-$version.$extension",
-            size = asset["size"]?.jsonPrimitive?.longOrNull ?: 0L,
-            sha256 = asset["digest"]?.jsonPrimitive?.contentOrNull
-                ?.takeIf { it.startsWith("sha256:", ignoreCase = true) }?.substringAfter(':'),
-            pageUrl = json["html_url"]?.jsonPrimitive?.contentOrNull ?: "https://github.com/$repository/releases",
-        )
+
+        val pkgType = currentPackageType()
+        fun nameOf(asset: kotlinx.serialization.json.JsonObject) = asset["name"]?.jsonPrimitive?.contentOrNull.orEmpty()
+
+        for (json in releasesArray) {
+            val isDraft = json["draft"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
+            val isPrerelease = json["prerelease"]?.jsonPrimitive?.contentOrNull?.toBooleanStrictOrNull() ?: false
+            if (isDraft || isPrerelease) continue
+
+            val tag = json["tag_name"]?.jsonPrimitive?.contentOrNull ?: continue
+            val version = tag.trim().removePrefix("v").removePrefix("V")
+            if (parseVersion(version).isEmpty()) continue
+
+            val assets = json["assets"]?.jsonArray?.map { it.jsonObject }.orEmpty()
+
+            val asset = when (pkgType) {
+                "deb" -> assets.firstOrNull { nameOf(it).endsWith(".deb", ignoreCase = true) }
+                "rpm" -> assets.firstOrNull { nameOf(it).endsWith(".rpm", ignoreCase = true) }
+                "appimage" -> assets.firstOrNull { nameOf(it).endsWith(".appimage", ignoreCase = true) }
+                else -> assets.firstOrNull { nameOf(it).endsWith(".msi", ignoreCase = true) }
+                    ?: assets.firstOrNull { nameOf(it).endsWith(".exe", ignoreCase = true) }
+            } ?: continue
+
+            val url = asset["browser_download_url"]?.jsonPrimitive?.contentOrNull ?: continue
+            val originalName = nameOf(asset)
+            val extension = if (originalName.endsWith(".AppImage", ignoreCase = true)) "AppImage"
+                else originalName.substringAfterLast('.', pkgType).lowercase()
+
+            return Release(
+                version = version,
+                notes = json["body"]?.jsonPrimitive?.contentOrNull.orEmpty().trim(),
+                downloadUrl = url,
+                fileName = "RecordLabs-$version.$extension",
+                size = asset["size"]?.jsonPrimitive?.longOrNull ?: 0L,
+                sha256 = asset["digest"]?.jsonPrimitive?.contentOrNull
+                    ?.takeIf { it.startsWith("sha256:", ignoreCase = true) }?.substringAfter(':'),
+                pageUrl = json["html_url"]?.jsonPrimitive?.contentOrNull ?: "https://github.com/$repository/releases",
+            )
+        }
+        return null
     }
 
     /** An installer downloaded earlier (for example before a restart) that still checks out. */
@@ -360,26 +351,30 @@ object AppUpdater {
     }
 
     private fun appExecutable(): File? {
-        if (!Platform.isWindows) {
-            return when (linuxUpdateKind) {
-                "appimage" -> Platform.appImagePath
-                "deb", "rpm" -> File("/usr/bin/record-labs").takeIf(File::isFile)
-                    ?: System.getProperty("jpackage.app-path")?.let(::File)?.takeIf(File::isFile)
-                else -> null
-            }
+        if (scriptOnly) return File("/fake/launcher")
+        if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) {
+            return System.getProperty("jpackage.app-path")?.let(::File)
+                ?.takeIf { it.isFile && it.name.endsWith(".exe", ignoreCase = true) }
         }
-        if (!scriptOnly && !System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) return null
+        System.getenv("APPIMAGE")?.let(::File)?.takeIf { it.isFile && it.canExecute() }?.let { return it }
         return System.getProperty("jpackage.app-path")?.let(::File)
-            ?.takeIf { it.isFile && it.name.endsWith(".exe", ignoreCase = true) }
+            ?.takeIf { it.isFile && it.canExecute() }
     }
 
     private fun psQuote(value: String) = "'" + value.replace("'", "''") + "'"
 
-    /** For tests: the PowerShell script that would run the installer. */
+    /** For tests: the PowerShell/shell script that would run the installer. */
     internal var scriptOnly = false
 
     private fun launchInstaller(ready: State.Ready, exe: File, relaunch: Boolean): Boolean {
-        if (!Platform.isWindows) return launchLinuxInstaller(ready, exe, relaunch)
+        return if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) {
+            launchWindowsInstaller(ready, exe, relaunch)
+        } else {
+            launchLinuxInstaller(ready, exe, relaunch)
+        }
+    }
+
+    private fun launchWindowsInstaller(ready: State.Ready, exe: File, relaunch: Boolean): Boolean {
         val installDir = exe.absoluteFile.parentFile.absolutePath.trimEnd('\\')
         val installer = ready.file.absolutePath
         val log = File(updatesDir, "install-${ready.release.version}.log").absolutePath
@@ -417,44 +412,48 @@ object AppUpdater {
         }.getOrDefault(false)
     }
 
-    private fun shQuote(value: String) = "'" + value.replace("'", "'\\''") + "'"
+    private fun launchLinuxInstaller(ready: State.Ready, exe: File, relaunch: Boolean): Boolean {
+        val scriptFile = File(updatesDir, "install-update.sh")
+        val pid = ProcessHandle.current().pid()
+        val pkg = currentPackageType()
+        val isAppImage = pkg == "appimage" || ready.file.name.endsWith(".AppImage", ignoreCase = true)
+        val isDeb = pkg == "deb" || ready.file.name.endsWith(".deb", ignoreCase = true)
+        val isRpm = pkg == "rpm" || ready.file.name.endsWith(".rpm", ignoreCase = true)
 
-    /**
-     * Linux: a small shell script waits for Record Labs to exit, then swaps
-     * the AppImage or installs the package through pkexec, writes the result
-     * (read by [cleanUp] on the next start) and optionally reopens the app.
-     */
-    private fun launchLinuxInstaller(ready: State.Ready, launcher: File, relaunch: Boolean): Boolean {
-        val update = ready.file.absolutePath
-        val kind = linuxUpdateKind ?: return false
-        val install = when (kind) {
-            "appimage" -> {
-                val target = launcher.absolutePath
-                """cp -f ${shQuote(update)} ${shQuote("$target.new")} && chmod 755 ${shQuote("$target.new")} && mv -f ${shQuote("$target.new")} ${shQuote(target)}"""
-            }
-            "deb" -> "pkexec sh -c 'if command -v apt-get >/dev/null; then apt-get install -y --allow-downgrades \"\$1\"; else dpkg -i \"\$1\"; fi' sh ${shQuote(update)}"
-            "rpm" -> "pkexec sh -c 'if command -v dnf >/dev/null; then dnf install -y \"\$1\"; elif command -v zypper >/dev/null; then zypper --non-interactive install --allow-unsigned-rpm \"\$1\"; else rpm -U --replacepkgs \"\$1\"; fi' sh ${shQuote(update)}"
-            else -> return false
-        }
         val script = buildString {
             appendLine("#!/bin/sh")
-            appendLine("pid=${ProcessHandle.current().pid()}")
-            appendLine("i=0; while kill -0 \"\$pid\" 2>/dev/null && [ \$i -lt 400 ]; do sleep 0.3; i=\$((i+1)); done")
-            appendLine("sleep 0.5")
-            appendLine("$install")
-            appendLine("code=\$?")
-            appendLine("printf '%s %s\n' ${shQuote(ready.release.version)} \"\$code\" > ${shQuote(resultFile.absolutePath)}")
-            if (relaunch) appendLine("nohup ${shQuote(launcher.absolutePath)} >/dev/null 2>&1 &")
+            appendLine("pid=$pid")
+            appendLine("while kill -0 \"\$pid\" 2>/dev/null; do sleep 0.1; done")
+            if (isAppImage) {
+                appendLine("cp '${ready.file.absolutePath}' '${exe.absolutePath}'")
+                appendLine("code=$?")
+                appendLine("chmod +x '${exe.absolutePath}'")
+            } else if (isDeb) {
+                appendLine("pkexec sh -c \"dpkg -i '${ready.file.absolutePath}'\"")
+                appendLine("code=$?")
+            } else if (isRpm) {
+                appendLine("pkexec sh -c \"rpm -Uvh --replacepkgs '${ready.file.absolutePath}'\"")
+                appendLine("code=$?")
+            } else {
+                appendLine("code=1")
+            }
+            appendLine("echo '${ready.release.version}' \$code > '${resultFile.absolutePath}'")
+            if (relaunch) {
+                appendLine("if [ \$code -eq 0 ]; then")
+                appendLine("  '${exe.absolutePath}' &")
+                appendLine("fi")
+            }
         }
-        val scriptFile = File(updatesDir, "install-update.sh")
+
         scriptFile.writeText(script)
         scriptFile.setExecutable(true)
         if (scriptOnly) return true
+
         return runCatching {
-            // setsid: the script outlives Record Labs and its terminal/session group.
-            val command = if (File("/usr/bin/setsid").isFile || File("/bin/setsid").isFile) listOf("setsid", "sh", scriptFile.absolutePath)
-                else listOf("sh", scriptFile.absolutePath)
-            ProcessBuilder(command).redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.DISCARD).start()
+            ProcessBuilder("sh", scriptFile.absolutePath)
+                .redirectErrorStream(true)
+                .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                .start()
             true
         }.getOrDefault(false)
     }
@@ -483,7 +482,8 @@ object AppUpdater {
     }.getOrDefault(false)
 
     private fun versionOfFile(name: String): String? =
-        Regex("""^RecordLabs-([0-9][0-9A-Za-z.\-]*?)\.(msi|exe|AppImage|deb|rpm)(\.part|\.sha256)?$""").find(name)?.groupValues?.get(1)
+        Regex("""^RecordLabs-([0-9][0-9A-Za-z.\-]*?)\.(msi|exe|deb|rpm|appimage)(\.part|\.sha256)?$""", RegexOption.IGNORE_CASE)
+            .find(name)?.groupValues?.get(1)
 
     private fun parseVersion(version: String): List<Int> =
         version.trim().removePrefix("v").removePrefix("V").substringBefore('-').substringBefore('+')

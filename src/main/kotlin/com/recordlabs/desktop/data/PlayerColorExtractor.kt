@@ -82,7 +82,7 @@ object PlayerColorExtractor {
             } else {
                 val request = Request.Builder()
                     .url(artworkUrl)
-                    .header("User-Agent", "RecordLabs-Windows/0.1.2")
+                    .header("User-Agent", "RecordLabs-Windows/0.1.5")
                     .build()
                 val bytes = httpClient.newCall(request).execute().use { response ->
                     if (!response.isSuccessful) return@runCatching null

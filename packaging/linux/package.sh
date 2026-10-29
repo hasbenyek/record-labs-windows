@@ -85,11 +85,26 @@ exit 0
 EOF
   cp "$root/DEBIAN/postinst" "$root/DEBIAN/postrm"
   chmod 755 "$root/DEBIAN/postinst" "$root/DEBIAN/postrm"
-  dpkg-deb --root-owner-group -Zxz -z6 --build "$root" "$OUT/${NAME}_${VERSION}_amd64.deb"
+  if command -v dpkg-deb >/dev/null 2>&1; then
+    dpkg-deb --root-owner-group -Zxz -z6 --build "$root" "$OUT/${NAME}_${VERSION}_amd64.deb"
+  else
+    echo "dpkg-deb not found: building .deb using tar and ar fallback..."
+    local deb_work="$WORK/deb-archive"
+    rm -rf "$deb_work"
+    mkdir -p "$deb_work"
+    printf "2.0\n" > "$deb_work/debian-binary"
+    tar -C "$root/DEBIAN" --owner=0 --group=0 --numeric-owner -cf - . | xz -T2 -6 > "$deb_work/control.tar.xz"
+    tar -C "$root" --exclude='./DEBIAN' --exclude='DEBIAN' --owner=0 --group=0 --numeric-owner -cf - . | xz -T2 -6 > "$deb_work/data.tar.xz"
+    (cd "$deb_work" && ar -rcSD "$OUT/${NAME}_${VERSION}_amd64.deb" debian-binary control.tar.xz data.tar.xz)
+  fi
 }
 
 # ---- .rpm ---------------------------------------------------------------------
 build_rpm() {
+  if ! command -v rpmbuild >/dev/null 2>&1; then
+    echo "rpmbuild not found: skipping .rpm package"
+    return 0
+  fi
   local top="$WORK/rpm"
   mkdir -p "$top"/{BUILD,RPMS,SOURCES,SPECS,SRPMS,BUILDROOT}
   local tree="$WORK/rpm-tree"
@@ -155,7 +170,14 @@ build_appimage() {
   cp "$appdir/usr/share/applications/$NAME.desktop" "$appdir/$NAME.desktop"
   cp "$appdir/usr/share/icons/hicolor/256x256/apps/$NAME.png" "$appdir/$NAME.png"
   ln -sf "$NAME.png" "$appdir/.DirIcon"
-  local tool="${APPIMAGETOOL:-$(command -v appimagetool || true)}"
+  local tool="${APPIMAGETOOL:-}"
+  if [ -z "$tool" ]; then
+    if command -v appimagetool >/dev/null 2>&1; then
+      tool="$(command -v appimagetool)"
+    elif [ -x "$HOME/.local/bin/appimagetool" ]; then
+      tool="$HOME/.local/bin/appimagetool"
+    fi
+  fi
   if [ -z "$tool" ]; then
     echo "appimagetool not found: AppDir left at $appdir (no .AppImage built)"
     return 0

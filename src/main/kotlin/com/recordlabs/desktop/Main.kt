@@ -137,6 +137,7 @@ import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.List
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.TextFields
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -615,107 +616,18 @@ private class DesktopFullscreenController(
 
     fun setFullscreen(enabled: Boolean) = onAwtThread {
         if (enabled == active) return@onAwtThread
-        if (!com.recordlabs.desktop.data.Platform.isWindows) {
-            // Linux (X11/Wayland): the window manager owns fullscreen; ask it
-            // through AWT instead of Win32 window styles.
-            linuxFullscreen(enabled)
+        if (!DesktopUiScale.isWindows()) {
+            val handled = runCatching { LinuxX11Window.requestFullscreen(frame, enabled) }.getOrDefault(false)
+            if (!handled) {
+                val device = frame.graphicsConfiguration?.device
+                if (device?.isFullScreenSupported == true) {
+                    device.fullScreenWindow = if (enabled) frame else null
+                }
+            }
+            active = enabled
             return@onAwtThread
         }
         if (enabled) enter() else leave()
-    }
-
-    private var linuxPreviousBounds: java.awt.Rectangle? = null
-    private var linuxWasMaximized = false
-
-    /**
-     * Linux: the window manager owns fullscreen (_NET_WM_STATE_FULLSCREEN via
-     * AWT). Leaving it used to only put the old bounds back; a window that was
-     * maximized (the default) then came back as a borderless, screen-sized
-     * "normal" window with its title bar off screen. Now a maximized window is
-     * maximized again, and a normal window gets its old position and size.
-     */
-    private var linuxUsedAwtFullscreen = false
-    private var linuxLeaveTimer: javax.swing.Timer? = null
-
-    private fun linuxFullscreen(enabled: Boolean) {
-        val device = frame.graphicsConfiguration.device
-        linuxLeaveTimer?.stop()
-        linuxLeaveTimer = null
-        runCatching {
-            if (enabled) {
-                val state = frame.extendedState
-                linuxWasMaximized = state and java.awt.Frame.MAXIMIZED_BOTH == java.awt.Frame.MAXIMIZED_BOTH
-                linuxPreviousBounds = java.awt.Rectangle(frame.bounds)
-                // Asked straight from the window manager (X11/XWayland); AWT's own
-                // fullscreen mode is only the fallback when that is not possible.
-                linuxUsedAwtFullscreen = !LinuxX11Window.requestFullscreen(frame, true)
-                if (linuxUsedAwtFullscreen) {
-                    if (device.isFullScreenSupported) device.fullScreenWindow = frame
-                    else {
-                        frame.extendedState = java.awt.Frame.NORMAL
-                        frame.bounds = java.awt.Rectangle(frame.graphicsConfiguration.bounds)
-                    }
-                }
-                active = true
-            } else {
-                active = false
-                if (linuxUsedAwtFullscreen) {
-                    if (device.fullScreenWindow === frame) device.fullScreenWindow = null
-                    linuxRestoreWindow(attempt = 0)
-                } else {
-                    linuxLeaveFullscreen()
-                }
-            }
-        }.onFailure { it.printStackTrace() }
-        active = enabled
-    }
-
-    /**
-     * Leaving fullscreen is only finished once the window manager reports the
-     * window as no longer fullscreen; until then the request is repeated
-     * (COSMIC sometimes dropped it, leaving the old-size app in the middle of a
-     * grey fullscreen surface). Then the previous size/maximized state returns.
-     */
-    private fun linuxLeaveFullscreen() {
-        LinuxX11Window.requestFullscreen(frame, false)
-        val started = System.currentTimeMillis()
-        var lastRequest = started
-        val timer = javax.swing.Timer(120, null)
-        timer.addActionListener {
-            if (active) { timer.stop(); return@addActionListener }
-            val now = System.currentTimeMillis()
-            val stillFullscreen = LinuxX11Window.isFullscreen(frame) == true
-            when {
-                !stillFullscreen || now - started > 3_000L -> {
-                    timer.stop()
-                    linuxRestoreWindow(attempt = 0)
-                }
-                now - lastRequest >= 500L -> {
-                    lastRequest = now
-                    LinuxX11Window.requestFullscreen(frame, false)
-                }
-            }
-        }
-        linuxLeaveTimer = timer
-        timer.start()
-    }
-
-    /** Re-applied a few times: some window managers finish leaving fullscreen after a delay and drop the first request. */
-    private fun linuxRestoreWindow(attempt: Int) {
-        if (active) return
-        if (linuxWasMaximized) {
-            if (frame.extendedState and java.awt.Frame.MAXIMIZED_BOTH != java.awt.Frame.MAXIMIZED_BOTH || attempt == 0) {
-                frame.extendedState = java.awt.Frame.NORMAL
-                frame.extendedState = java.awt.Frame.MAXIMIZED_BOTH
-            }
-        } else {
-            linuxPreviousBounds?.let { if (frame.bounds != it) frame.bounds = it }
-        }
-        if (attempt < 3) {
-            javax.swing.Timer(if (attempt == 0) 120 else 300) { linuxRestoreWindow(attempt + 1) }
-                .apply { isRepeats = false }
-                .start()
-        }
     }
 
     private fun enter() {
@@ -793,10 +705,12 @@ private val globalCatalogCache = mutableMapOf<CatalogDestination, CatalogPageDat
 private val expandedArtistPages = mutableSetOf<CatalogDestination>()
 
 fun main(args: Array<String>) {
-    // Packaging check: play a tone through the real audio path, no window.
-    if ("--self-test-audio" in args) kotlin.system.exitProcess(runAudioSelfTest())
-    if ("--self-test-login" in args) kotlin.system.exitProcess(runLoginSelfTest())
-    if ("--self-test-connect" in args) kotlin.system.exitProcess(runConnectSelfTest())
+    // Set Java2D's Linux scale before Compose or AWT initializes its display toolkit.
+    DesktopUiScale.configureBeforeAwt()
+    if (args.contains("--self-test-display")) {
+        DesktopUiScale.printSelfTest()
+        return
+    }
     // Load JavaFX media natives before the off-screen video decoder starts.
     ensureJavaFxMediaNatives()
     val shutdownAction = {
@@ -813,6 +727,15 @@ fun main(args: Array<String>) {
     })
     application {
         val savedWindow = remember { WindowsPreferences.windowSession() }
+        val logicalScreenSize = remember {
+            runCatching { java.awt.Toolkit.getDefaultToolkit().screenSize }.getOrNull()
+        }
+        val safeWindowWidth = (savedWindow?.width ?: 1180f).coerceAtMost(
+            (logicalScreenSize?.width?.times(.96f) ?: Float.MAX_VALUE).coerceAtLeast(720f),
+        )
+        val safeWindowHeight = (savedWindow?.height ?: 760f).coerceAtMost(
+            (logicalScreenSize?.height?.times(.90f) ?: Float.MAX_VALUE).coerceAtLeast(520f),
+        )
         val initialPlacement = when (savedWindow?.placement) {
             "Floating" -> WindowPlacement.Floating
             "Maximized" -> WindowPlacement.Maximized
@@ -820,8 +743,8 @@ fun main(args: Array<String>) {
         }
         val windowState = rememberWindowState(
             placement = initialPlacement,
-            width = (savedWindow?.width ?: 1180f).dp,
-            height = (savedWindow?.height ?: 760f).dp,
+            width = safeWindowWidth.dp,
+            height = safeWindowHeight.dp,
         )
         var isFullscreen by remember { mutableStateOf(false) }
         val toggleFullscreen = { isFullscreen = !isFullscreen }
@@ -890,16 +813,17 @@ fun main(args: Array<String>) {
             val currentlyFullscreen by rememberUpdatedState(isFullscreen)
 
             LaunchedEffect(window) {
-                // Dark title bar through DWM exists only on Windows.
-                if (com.recordlabs.desktop.data.Platform.isWindows) try {
-                    val hwnd = com.sun.jna.platform.win32.WinDef.HWND(com.sun.jna.Native.getWindowPointer(window))
-                    val useDarkMode = com.sun.jna.ptr.IntByReference(1)
-                    val result = RecordLabsDwmapi.INSTANCE.DwmSetWindowAttribute(hwnd, 20, useDarkMode, 4)
-                    if (result != 0) {
-                        RecordLabsDwmapi.INSTANCE.DwmSetWindowAttribute(hwnd, 19, useDarkMode, 4)
+                if (DesktopUiScale.isWindows()) {
+                    try {
+                        val hwnd = com.sun.jna.platform.win32.WinDef.HWND(com.sun.jna.Native.getWindowPointer(window))
+                        val useDarkMode = com.sun.jna.ptr.IntByReference(1)
+                        val result = RecordLabsDwmapi.INSTANCE.DwmSetWindowAttribute(hwnd, 20, useDarkMode, 4)
+                        if (result != 0) {
+                            RecordLabsDwmapi.INSTANCE.DwmSetWindowAttribute(hwnd, 19, useDarkMode, 4)
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
                     }
-                } catch (e: Exception) {
-                    e.printStackTrace()
                 }
             }
 
@@ -958,12 +882,6 @@ fun main(args: Array<String>) {
                     runCatching {
                         window.extendedState = window.extendedState and java.awt.Frame.ICONIFIED.inv()
                         window.toFront()
-                        if (!com.recordlabs.desktop.data.Platform.isWindows) {
-                            // Some Linux window managers ignore toFront() from a window
-                            // that is not focused; briefly going "always on top" raises it.
-                            window.isAlwaysOnTop = true
-                            window.isAlwaysOnTop = false
-                        }
                         window.requestFocus()
                     }
                 }
@@ -987,17 +905,29 @@ fun main(args: Array<String>) {
                     FloatingLyricsState.requestRestoreDesktop = null
                 }
             }
-            Box(Modifier.fillMaxSize()) {
-                RecordLabsWindow(
-                    isFullscreen = isFullscreen,
-                    onToggleFullscreen = toggleFullscreen,
+            val densityScale = DesktopUiScale.effectiveDensityScale()
+            val baseDensity = androidx.compose.ui.platform.LocalDensity.current
+            val customDensity = remember(baseDensity, densityScale) {
+                androidx.compose.ui.unit.Density(
+                    density = baseDensity.density * densityScale,
+                    fontScale = baseDensity.fontScale * densityScale
                 )
-                // A music video opened full screen from the player/lyrics artwork.
-                MusicVideoFullscreenOverlay(
-                    currentTrackId = FloatingLyricsState.currentTrack?.id,
-                    isWindowFullscreen = isFullscreen,
-                    onWindowFullscreen = { isFullscreen = it },
-                )
+            }
+            androidx.compose.runtime.CompositionLocalProvider(
+                androidx.compose.ui.platform.LocalDensity provides customDensity
+            ) {
+                Box(Modifier.fillMaxSize()) {
+                    RecordLabsWindow(
+                        isFullscreen = isFullscreen,
+                        onToggleFullscreen = toggleFullscreen,
+                    )
+                    // A music video opened full screen from the player/lyrics artwork.
+                    MusicVideoFullscreenOverlay(
+                        currentTrackId = FloatingLyricsState.currentTrack?.id,
+                        isWindowFullscreen = isFullscreen,
+                        onWindowFullscreen = { isFullscreen = it },
+                    )
+                }
             }
         }
         if (FloatingLyricsState.isEnabled && FloatingLyricsState.currentTrack != null) {
@@ -1053,7 +983,7 @@ private fun RecordLabsWindow(
             onBackground = Color.White,
             onSurface = Color.White,
         ),
-        typography = androidx.compose.material.Typography(defaultFontFamily = AppFonts.family),
+        typography = androidx.compose.material.Typography(defaultFontFamily = FontFamily.Default),
         shapes = Shapes(
             small = RoundedCornerShape(14.dp),
             medium = RoundedCornerShape(22.dp),
@@ -1147,6 +1077,9 @@ private fun RecordLabsWindow(
 
         LaunchedEffect(playerDestination) {
             if (playerDestination != null) playerHeaderVisible.value = true
+            // The hover tracker only exists on the player pages; leaving them
+            // gives no Exit event, so start fresh next time.
+            else headerHovered = false
         }
         LaunchedEffect(playerDestination, playerHeaderVisible.value, landscapeSearchExpanded, headerHovered) {
             if (playerDestination != null && playerHeaderVisible.value && !landscapeSearchExpanded && !headerHovered) {
@@ -1561,18 +1494,6 @@ private fun RecordLabsWindow(
             }
         }
 
-        /**
-         * A song picked in a queue list. While another device plays the sound the
-         * pick goes to it (before, the queue sent a single "next"/"previous", or
-         * this PC took the sound over and started playing itself).
-         */
-        fun selectQueueItem(index: Int) {
-            if (index !in playbackQueue.indices || index == playbackQueueIndex) return
-            if (WindowsRecordLabsConnect.hasRemotePlaybackDevice() && WindowsRecordLabsConnect.sendPlayQueueIndex(index)) return
-            playbackQueueIndex = index
-            beginPlayback(playbackQueue[index])
-        }
-
         fun moveQueueItem(trackId: String, to: Int) {
             val from = playbackQueue.indexOfFirst { it.id == trackId }
             if (from !in playbackQueue.indices || to !in playbackQueue.indices || from == to) return
@@ -1600,12 +1521,6 @@ private fun RecordLabsWindow(
             val index = playbackQueue.indexOfFirst { it.id == trackId }
             if (index !in playbackQueue.indices || playbackQueue[index].id == currentTrack?.id) return
             val activeId = currentTrack?.id
-            if (WindowsRecordLabsConnect.hasRemotePlaybackDevice() && WindowsRecordLabsConnect.sendQueueRemove(trackId)) {
-                // The output device applies it; its next state confirms the queue.
-                playbackQueue = playbackQueue.toMutableList().apply { removeAt(index) }
-                playbackQueueIndex = playbackQueue.indexOfFirst { it.id == activeId }.coerceAtLeast(0)
-                return
-            }
             playbackQueue = playbackQueue.toMutableList().apply { removeAt(index) }
             playbackQueueIndex = playbackQueue.indexOfFirst { it.id == activeId }.coerceAtLeast(0)
             manualQueueTailIndex = manualQueueTailIndex.coerceIn(playbackQueueIndex, playbackQueue.lastIndex.coerceAtLeast(0))
@@ -1668,9 +1583,6 @@ private fun RecordLabsWindow(
             val seed = currentTrack ?: return@LaunchedEffect
             // Settings > Player > Load more automatically.
             if (!com.recordlabs.desktop.data.AppSettings.autoLoadMore.value) return@LaunchedEffect
-            // A silent Connect mirror shows the playing device's queue; adding its own
-            // radio songs made the list jump every time the next state replaced it.
-            if (WindowsRecordLabsConnect.hasRemotePlaybackDevice()) return@LaunchedEffect
             val remaining = playbackQueue.size - playbackQueueIndex - 1
             if (queuePrefetching || remaining >= 24) return@LaunchedEffect
             queuePrefetching = true
@@ -1714,7 +1626,14 @@ private fun RecordLabsWindow(
             coroutineScope {
                 launch { runCatching { repository.streamUrl(next) } }
                 launch { runCatching { WindowsLyricsProviderRegistry.getLyricsResult(next) } }
-                launch { runCatching { WindowsAnimatedArtworkRepository.find(next) } }
+                launch {
+                    runCatching {
+                        val artwork = WindowsAnimatedArtworkRepository.find(next)
+                        if (artwork != null) {
+                            AnimatedArtworkDiskCache.prefetch(artwork.streamUrl)
+                        }
+                    }
+                }
                 launch(Dispatchers.IO) { runCatching { WindowsOfflineArtworkCache.download(next) } }
             }
         }
@@ -1859,7 +1778,7 @@ private fun RecordLabsWindow(
             }
             WindowsRecordLabsConnect.start(
                 accountKeys = accountKeys,
-                deviceName = com.recordlabs.desktop.data.Platform.deviceName,
+                deviceName = System.getenv("COMPUTERNAME").orEmpty().ifBlank { "Windows PC" },
                 playbackProvider = {
                     ConnectPlaybackState(
                         ownerId = WindowsPreferences.connectDeviceId(),
@@ -1906,16 +1825,7 @@ private fun RecordLabsWindow(
                             if (remoteQueue.isNotEmpty()) {
                                 playbackQueue = remoteQueue
                                 playbackQueueIndex = remote.queueIndex.coerceIn(0, remoteQueue.lastIndex)
-                                    .let { index -> if (remoteQueue[index].id == remoteTrack.id) index else remoteQueue.indexOfFirst { it.id == remoteTrack.id }.takeIf { it >= 0 } ?: index }
                                 manualQueueTailIndex = playbackQueueIndex
-                            } else if (playbackQueue.none { it.id == remoteTrack.id }) {
-                                // No queue from the other device: show its song rather than
-                                // this PC's old queue that does not contain it.
-                                playbackQueue = listOf(remoteTrack)
-                                playbackQueueIndex = 0
-                                manualQueueTailIndex = 0
-                            } else {
-                                playbackQueueIndex = playbackQueue.indexOfFirst { it.id == remoteTrack.id }
                             }
                             if (currentTrack?.id != remoteTrack.id) {
                                 beginPlayback(
@@ -1940,11 +1850,7 @@ private fun RecordLabsWindow(
                             // 500-1000 ms controller window. While the mirror is
                             // still loading, seeking or resuming would restart it.
                             val mirrorReady = mediaPlayer.isReady
-                            // Linux (VLC): every seek on a stream re-buffers for a moment, so the
-                            // silent mirror only re-syncs on a clear gap; seeking at every small
-                            // drift kept it half-loaded and the handoff then had to reload the song.
-                            val (aheadLimit, behindLimit) = if (com.recordlabs.desktop.data.Platform.isWindows) 50L to -250L else 400L to -900L
-                            if (mirrorReady && (drift > aheadLimit || drift < behindLimit)) mediaPlayer.seekTo(target)
+                            if (mirrorReady && (drift > 50L || drift < -250L)) mediaPlayer.seekTo(target)
                             if (mirrorReady && remote.isPlaying && !mediaPlayer.isPlaying) mediaPlayer.resume()
                             if (mirrorReady && !remote.isPlaying && mediaPlayer.isPlaying) mediaPlayer.pause()
                             playbackPositionMs = target
@@ -1990,21 +1896,10 @@ private fun RecordLabsWindow(
                                 }
                             }
                             "queue_next" -> commandTrack?.let(::enqueueTrack)
-                            // Indexes from other devices count from the start of the queue
-                            // window this PC sent them (see WindowsRecordLabsConnect.sentQueueOffset).
                             "queue_move" -> {
-                                val toIndex = position?.toInt()?.plus(WindowsRecordLabsConnect.sentQueueOffset)
+                                val toIndex = position?.toInt()
                                 if (commandTrack != null && toIndex != null) moveQueueItem(commandTrack.id, toIndex)
                             }
-                            "play_queue_index" -> {
-                                val index = position?.toInt()?.plus(WindowsRecordLabsConnect.sentQueueOffset)
-                                if (index != null && index in playbackQueue.indices) {
-                                    mediaPlayer.setVolume(playbackVolume)
-                                    playbackQueueIndex = index
-                                    beginPlayback(playbackQueue[index])
-                                }
-                            }
-                            "queue_remove" -> commandTrack?.let { removeQueueItem(it.id) }
                         }
                     }
                 },
@@ -2363,29 +2258,6 @@ private fun RecordLabsWindow(
             }
             mediaPlayer.seekTo(position)
             currentTrack?.let { WindowsListenTogetherClient.broadcastPlayback("seek", it, position) }
-            if (!com.recordlabs.desktop.data.Platform.isWindows) com.recordlabs.desktop.data.LinuxMpris.seeked(position)
-        }
-        // Linux: keyboard media keys and the desktop's media controls arrive over
-        // MPRIS (D-Bus) and run the same commands as the Windows helper's keys.
-        if (!com.recordlabs.desktop.data.Platform.isWindows) {
-            val latestSeek by rememberUpdatedState(::seekPlayback)
-            DisposableEffect(Unit) {
-                val mpris = com.recordlabs.desktop.data.LinuxMpris
-                mpris.onCommand = { command -> scope.launch { latestNativeMediaCommand(command) } }
-                mpris.onSeekTo = { position -> scope.launch { latestSeek(position) } }
-                mpris.positionProvider = { mediaPlayer.positionMs }
-                mpris.onRaise = { java.awt.EventQueue.invokeLater { FloatingLyricsState.requestRestoreDesktop?.invoke() } }
-                mpris.start()
-                onDispose {
-                    mpris.onCommand = null
-                    mpris.onSeekTo = null
-                    mpris.onRaise = null
-                    mpris.stop()
-                }
-            }
-            LaunchedEffect(currentTrack?.id, isPlaying, playbackDurationMs) {
-                com.recordlabs.desktop.data.LinuxMpris.update(currentTrack, isPlaying, playbackDurationMs)
-            }
         }
         fun submitSearch(rawQuery: String) {
             val query = rawQuery.trim()
@@ -2762,7 +2634,7 @@ private fun RecordLabsWindow(
                                         visible = globalQueueVisible,
                                         queue = playbackQueue,
                                         activeIndex = playbackQueueIndex,
-                                        onSelect = { selectQueueItem(it) },
+                                        onSelect = { skipTrack(it - playbackQueueIndex) },
                                         onMove = ::moveQueueItem,
                                         onRemove = ::removeQueueItem,
                                         onClose = { globalQueueVisible = false },
@@ -2885,7 +2757,7 @@ homeLoading = homeLoading,
                                             visible = globalQueueVisible,
                                             queue = playbackQueue,
                                             activeIndex = playbackQueueIndex,
-                                            onSelect = { selectQueueItem(it) },
+                                            onSelect = { skipTrack(it - playbackQueueIndex) },
                                             onMove = ::moveQueueItem,
                                             onRemove = ::removeQueueItem,
                                             onClose = { globalQueueVisible = false },
@@ -2938,7 +2810,7 @@ homeLoading = homeLoading,
                                             visible = globalQueueVisible,
                                             queue = playbackQueue,
                                             activeIndex = playbackQueueIndex,
-                                            onSelect = { selectQueueItem(it) },
+                                            onSelect = { skipTrack(it - playbackQueueIndex) },
                                             onMove = ::moveQueueItem,
                                             onRemove = ::removeQueueItem,
                                             onClose = { globalQueueVisible = false },
@@ -2986,7 +2858,7 @@ homeLoading = homeLoading,
                                             visible = globalQueueVisible,
                                             queue = playbackQueue,
                                             activeIndex = playbackQueueIndex,
-                                            onSelect = { selectQueueItem(it) },
+                                            onSelect = { skipTrack(it - playbackQueueIndex) },
                                             onMove = ::moveQueueItem,
                                             onRemove = ::removeQueueItem,
                                             onClose = { globalQueueVisible = false },
@@ -3072,7 +2944,12 @@ homeLoading = homeLoading,
                             onNext = { skipTrack(1) },
                             queue = playbackQueue,
                             queueIndex = playbackQueueIndex,
-                            onQueueTrack = { index -> selectQueueItem(index) },
+                            onQueueTrack = { index ->
+                                if (index in playbackQueue.indices && index != playbackQueueIndex) {
+                                    playbackQueueIndex = index
+                                    beginPlayback(playbackQueue[index])
+                                }
+                            },
                             onQueueMove = ::moveQueueItem,
                             onQueueRemove = ::removeQueueItem,
                             volume = playbackVolume,
@@ -3161,7 +3038,12 @@ homeLoading = homeLoading,
                             onShare = { copyTrackLink(currentTrack!!) },
                             queue = playbackQueue,
                             queueIndex = playbackQueueIndex,
-                            onQueueTrack = { index -> selectQueueItem(index) },
+                            onQueueTrack = { index ->
+                                if (index in playbackQueue.indices && index != playbackQueueIndex) {
+                                    playbackQueueIndex = index
+                                    beginPlayback(playbackQueue[index])
+                                }
+                            },
                             onQueueMove = ::moveQueueItem,
                             onQueueRemove = ::removeQueueItem,
                             volume = playbackVolume,
@@ -3224,12 +3106,20 @@ homeLoading = homeLoading,
                                 visible = playerDestination == null || playerHeaderVisible.value,
                                 enter = androidx.compose.animation.fadeIn(androidx.compose.animation.core.tween(300)) + androidx.compose.animation.slideInVertically(androidx.compose.animation.core.tween(300)) { -it },
                                 exit = androidx.compose.animation.fadeOut(androidx.compose.animation.core.tween(300)) + androidx.compose.animation.slideOutVertically(androidx.compose.animation.core.tween(300)) { -it },
+                                // Hover only matters for the player's auto-hiding header. Elsewhere
+                                // this full-width hit area sat on top of the side queue panel and
+                                // swallowed clicks on its close button.
+                                modifier = if (playerDestination != null) Modifier.pointerInput(Unit) {
+                                    awaitPointerEventScope {
+                                        while (true) {
+                                            val event = awaitPointerEvent(PointerEventPass.Initial)
+                                            if (event.type == PointerEventType.Enter) headerHovered = true
+                                            if (event.type == PointerEventType.Exit) headerHovered = false
+                                        }
+                                    }
+                                } else Modifier
                             ) {
                                 LandscapeHeader(
-                                    // Hover is tracked on the header itself, not on a
-                                    // full-width wrapper: that wrapper sat above the side
-                                    // queue and swallowed clicks on its close (X) button.
-                                    onHoverChange = { headerHovered = it },
                                     searchFocusRequester = searchFocusRequester,
                                     query = searchQuery.value,
                                     selectAllTrigger = searchSelectAllTrigger.value,
@@ -3416,8 +3306,8 @@ private fun ConnectDevicesPage(
 
                 Spacer(Modifier.height(6.dp))
                 ConnectDeviceRow(
-                    name = if (com.recordlabs.desktop.data.Platform.isWindows) "This Windows PC" else "This Linux PC",
-                    platform = (if (com.recordlabs.desktop.data.Platform.isWindows) "Windows" else "Linux") + " • This device",
+                    name = "This Windows PC",
+                    platform = "Windows • This device",
                     selected = remoteOwnerId == null,
                     onClick = { onSelect(localDeviceId) },
                 )
@@ -3450,30 +3340,6 @@ private fun ConnectDevicesPage(
                     )
                     discovery.lastError?.let { error ->
                         Text(error, color = Color(0xFFFF6B6B), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 12.dp))
-                    }
-                    // Linux: a firewall that blocks Connect's ports (openSUSE by default).
-                    if (!com.recordlabs.desktop.data.Platform.isWindows) {
-                        val firewall by androidx.compose.runtime.produceState<com.recordlabs.desktop.data.LinuxFirewall.Status?>(null) {
-                            value = withContext(Dispatchers.IO) { com.recordlabs.desktop.data.LinuxFirewall.check() }
-                        }
-                        firewall?.takeIf { it.connectAllowed != true }?.let { status ->
-                            Text(
-                                if (status.connectAllowed == false) "The ${status.tool} firewall blocks Record Labs Connect. Open its ports once in a terminal:"
-                                else "The ${status.tool} firewall is on and may block Record Labs Connect. If no device appears, run in a terminal:",
-                                color = Color(0xFFFFB86B),
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(start = 12.dp, end = 12.dp, top = 10.dp),
-                            )
-                            androidx.compose.foundation.text.selection.SelectionContainer {
-                                Text(
-                                    status.fixCommand,
-                                    color = Color.White,
-                                    fontSize = 12.sp,
-                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
-                                )
-                            }
-                        }
                     }
                     if (discovery.rejectedAccountPackets > 0) {
                         Text(
@@ -3625,8 +3491,6 @@ private fun LandscapeHeader(
     showLyricsTranslation: Boolean = false,
     /** Width of the side queue panel open at the right: the header ends before it. */
     endInset: androidx.compose.ui.unit.Dp = 0.dp,
-    /** Pointer entered (true) / left (false) the header's buttons and search area. */
-    onHoverChange: (Boolean) -> Unit = {},
 ) {
     var textFieldValue by remember {
         mutableStateOf(
@@ -3707,17 +3571,7 @@ private fun LandscapeHeader(
             },
     )
     BoxWithConstraints(
-        Modifier.fillMaxWidth().padding(start = animatedQueueWidth, end = animatedEndInset).height(72.dp)
-            .pointerInput(Unit) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.type == PointerEventType.Enter) onHoverChange(true)
-                        if (event.type == PointerEventType.Exit) onHoverChange(false)
-                    }
-                }
-            }
-            .padding(horizontal = 14.dp),
+        Modifier.fillMaxWidth().padding(start = animatedQueueWidth, end = animatedEndInset).height(72.dp).padding(horizontal = 14.dp),
     ) {
         val animatedStartPadding by androidx.compose.animation.core.animateDpAsState(
             targetValue = startPadding,
@@ -4710,7 +4564,7 @@ private fun ListenTogetherTextField(
     val style = androidx.compose.ui.text.TextStyle(
         color = if (enabled) Color.White else SecondaryText,
         fontSize = if (monospace) 17.sp else 15.sp,
-        fontFamily = if (monospace) androidx.compose.ui.text.font.FontFamily.Monospace else AppFonts.family,
+        fontFamily = if (monospace) androidx.compose.ui.text.font.FontFamily.Monospace else null,
         letterSpacing = if (monospace) 3.sp else androidx.compose.ui.unit.TextUnit.Unspecified,
         fontWeight = if (monospace) FontWeight.SemiBold else null,
     )
@@ -5082,11 +4936,16 @@ private fun HomeCard(item: HomeItem, width: Dp, sourceItems: List<HomeItem>, onT
     }
 }
 
+@OptIn(ExperimentalComposeUiApi::class)
 @Composable
 private fun HomeListRow(item: HomeItem, sourceItems: List<HomeItem>, onTrackMore: (Track) -> Unit, onPlayNext: (Track) -> Unit, onItemClick: (HomeItem, List<HomeItem>) -> Unit) {
     val track = item.track
     Row(
             Modifier.fillMaxWidth().background(Background)
+                // Right click opens the same menu as the ⋮ button (as on HomeCard).
+                .onPointerEvent(PointerEventType.Press, PointerEventPass.Initial) { event ->
+                    if (event.buttons.isSecondaryPressed) track?.let(onTrackMore)
+                }
                 .clickable { onItemClick(item, sourceItems) }
                 .padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -5944,7 +5803,7 @@ private fun LibrarySearchField(query: String, onQueryChange: (String) -> Unit, m
                 value = query,
                 onValueChange = onQueryChange,
                 singleLine = true,
-                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp, fontFamily = AppFonts.family),
+                textStyle = androidx.compose.ui.text.TextStyle(color = Color.White, fontSize = 14.sp),
                 cursorBrush = androidx.compose.ui.graphics.SolidColor(Accent),
                 modifier = Modifier.fillMaxWidth().trackTextInputFocus(),
             )
@@ -7901,6 +7760,7 @@ private fun PlayerMenuBottomSheet(
                     Spacer(Modifier.width(12.dp))
                     Text("Advanced — tempo and pitch")
                 }
+                LyricsFontStyleItem()
                 LyricsTranslationLanguageItem()
             }
         },
@@ -8614,7 +8474,7 @@ private fun LyricsPage(
         value = WindowsLyricsTranslator.translate(texts, translationTarget).orEmpty()
     }
     // Positive offset delays the lyric; negative offset advances it.
-    val lyricsPositionMs = (positionMs - lyricsOffsetMs + LyricsTiming.platformLeadMs).coerceAtLeast(0L)
+    val lyricsPositionMs = (positionMs - lyricsOffsetMs).coerceAtLeast(0L)
     val currentGroupIndex = remember(lyricGroups, lyricsPositionMs) {
         if (lyricGroups.isEmpty()) -1
         else {
@@ -9224,6 +9084,7 @@ private fun LyricsToolsItems(
         Spacer(Modifier.width(12.dp)); Column(Modifier.weight(1f)) { Text("Pronunciation"); Text("Shown automatically for non-Latin lyrics", color = SecondaryText, fontSize = 11.sp) }
         Switch(checked = pronunciationEnabled, onCheckedChange = onPronunciationEnabled)
     }
+    LyricsFontStyleItem()
     LyricsTranslationLanguageItem()
 }
 
@@ -10200,28 +10061,6 @@ private fun TimedLyricText(
     transitionDelayMillis: Int,
     pronunciationEnabled: Boolean,
 ) {
-    // Every lyric line (and its pronunciation) in the lyrics typeface.
-    androidx.compose.runtime.CompositionLocalProvider(
-        androidx.compose.material.LocalTextStyle provides androidx.compose.material.LocalTextStyle.current.copy(fontFamily = AppFonts.lyrics),
-    ) {
-        TimedLyricTextContent(line, isActive, positionMs, isPlaying, textSize, textAlign, onSeek, depthAlpha, depthBlur, transitionDelayMillis, pronunciationEnabled)
-    }
-}
-
-@Composable
-private fun TimedLyricTextContent(
-    line: RichLyricLine,
-    isActive: Boolean,
-    positionMs: Long,
-    isPlaying: Boolean,
-    textSize: Float,
-    textAlign: androidx.compose.ui.text.style.TextAlign,
-    onSeek: (Long) -> Unit,
-    depthAlpha: Float,
-    depthBlur: Float,
-    transitionDelayMillis: Int,
-    pronunciationEnabled: Boolean,
-) {
     val plain = lyricPlainText(line)
     val transitionEasing = androidx.compose.animation.core.CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
     val activeEmphasis by animateFloatAsState(
@@ -10390,6 +10229,7 @@ private fun TimedLyricTextContent(
                 fontSize = layoutSize.sp,
                 lineHeight = (layoutSize * 1.42f).sp,
                 fontWeight = FontWeight.Bold,
+                fontFamily = AppFonts.lyrics,
                 fontStyle = androidx.compose.ui.text.font.FontStyle.Normal,
                 textAlign = textAlign,
                 onTextLayout = { textLayoutResult = it },
@@ -10406,6 +10246,7 @@ private fun TimedLyricTextContent(
                         fontSize = layoutSize.sp,
                         lineHeight = (layoutSize * 1.42f).sp,
                         fontWeight = FontWeight.Bold,
+                        fontFamily = AppFonts.lyrics,
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Normal,
                         textAlign = textAlign,
                         modifier = Modifier.fillMaxWidth()
@@ -10417,6 +10258,7 @@ private fun TimedLyricTextContent(
                         fontSize = layoutSize.sp,
                         lineHeight = (layoutSize * 1.42f).sp,
                         fontWeight = FontWeight.Bold,
+                        fontFamily = AppFonts.lyrics,
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Normal,
                         textAlign = textAlign,
                         modifier = Modifier.fillMaxWidth().drawWithContent {
@@ -10478,10 +10320,10 @@ private fun TimedLyricTextContent(
                 val letterMeasurer = androidx.compose.ui.text.rememberTextMeasurer(cacheSize = 0)
                 val letterStyle = androidx.compose.material.LocalTextStyle.current.merge(
                     androidx.compose.ui.text.TextStyle(
-                        fontFamily = AppFonts.lyrics,
                         fontSize = layoutSize.sp,
                         lineHeight = (layoutSize * 1.42f).sp,
                         fontWeight = FontWeight.Bold,
+                        fontFamily = AppFonts.lyrics,
                         fontStyle = androidx.compose.ui.text.font.FontStyle.Normal,
                     ),
                 )
@@ -10528,6 +10370,7 @@ private fun TimedLyricTextContent(
                 fontSize = (layoutSize * .46f).coerceAtLeast(12f).sp,
                 lineHeight = (layoutSize * .62f).sp,
                 fontWeight = FontWeight.Bold,
+                fontFamily = AppFonts.lyrics,
                 textAlign = textAlign,
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
             )
@@ -10551,6 +10394,7 @@ private fun TimedLyricTextContent(
                 fontSize = (layoutSize * .50f).coerceAtLeast(12f).sp,
                 lineHeight = (layoutSize * .66f).sp,
                 fontWeight = FontWeight.Bold,
+                fontFamily = AppFonts.lyrics,
                 textAlign = textAlign,
                 modifier = Modifier.fillMaxWidth().padding(top = 3.dp),
             )
@@ -10811,6 +10655,62 @@ private fun LyricsTranslationLanguageItem() {
         Text(LyricsTranslationSettings.nameOf(LyricsTranslationSettings.targetLanguage), color = SecondaryText, maxLines = 1)
     }
     if (choosing) LyricsTranslationLanguageDialog(onDismiss = { choosing = false })
+}
+
+/** ⋮ menu entry (music player and lyrics page): the typeface of the lyrics. */
+@Composable
+private fun LyricsFontStyleItem() {
+    var choosing by remember { mutableStateOf(false) }
+    val style = com.recordlabs.desktop.data.AppSettings.lyricsFontStyle.value
+    DropdownMenuItem(onClick = { choosing = true }) {
+        Icon(Icons.Default.TextFields, null, tint = Accent)
+        Spacer(Modifier.width(12.dp))
+        Text("Lyrics font", modifier = Modifier.weight(1f))
+        Text(lyricsFontStyleName(style), color = SecondaryText, maxLines = 1)
+    }
+    if (choosing) LyricsFontStyleDialog(onDismiss = { choosing = false })
+}
+
+private fun lyricsFontStyleName(style: String): String = if (style == "classic") "Classic" else "Display"
+
+@Composable
+private fun LyricsFontStyleDialog(onDismiss: () -> Unit) {
+    var style by com.recordlabs.desktop.data.AppSettings.lyricsFontStyle
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Lyrics font") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf(
+                    "display" to "Bold and rounded (SF Pro Display / Inter Display)",
+                    "classic" to "The app's own font (Segoe UI)",
+                ).forEach { (option, subtitle) ->
+                    val selected = option == style
+                    Row(
+                        Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(if (selected) Color.White.copy(alpha = .08f) else Color.Transparent)
+                            .clickable { style = option; onDismiss() }
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(
+                                lyricsFontStyleName(option),
+                                fontFamily = AppFonts.lyricsFamilyFor(option),
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 22.sp,
+                            )
+                            Text(subtitle, color = SecondaryText, fontSize = 11.sp)
+                        }
+                        if (selected) Icon(Icons.Default.Check, null, tint = Accent)
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
 }
 
 @Composable

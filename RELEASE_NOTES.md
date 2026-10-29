@@ -1,12 +1,12 @@
-Record Labs 0.1.3 — now on Linux too
+Record Labs 0.1.5
 
-**New: Record Labs for Linux** (Ubuntu, Pop!_OS, Debian, Mint, Fedora, openSUSE, Arch)
-- Installers: .deb, .rpm, AppImage and an Arch package, with in-app updates
-- Same app as on Windows: streaming, synced lyrics, music videos, Listen Together, Record Labs Connect
-- Keyboard media keys and the desktop's media controls (MPRIS)
-- Floating lyrics as a see-through overlay on Wayland desktops (COSMIC, KDE…), across multiple monitors
+**New (Windows and Linux)**
+- Lyrics font: choose between Display (bold and rounded, now the default everywhere) and Classic (Segoe UI) from the ⋮ menu on the music player and lyrics page
+- Right-click a song in Quick picks, Trending and similar lists to open its menu (same as the ⋮ button)
 
 **Fixes (Windows and Linux)**
-- The Queue panel's X button closes the panel again
-- Record Labs Connect: long queues reach the other device; picking, removing and reordering songs from the other device works
-- Floating lyrics follow the Lyrics offset setting
+- The X button on the side Queue panel closes it again
+
+**Linux**
+- Fedora: the app is no longer too small at 125% / 166% display scaling
+- Also includes everything from 0.1.4: faster animated artwork on Pop!_OS / Debian, animated artwork on Fedora and systems without HEVC, floating lyrics across multiple monitors, and the new app icon

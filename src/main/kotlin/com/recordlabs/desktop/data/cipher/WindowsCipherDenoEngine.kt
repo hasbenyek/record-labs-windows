@@ -43,10 +43,10 @@ object PersistentDenoDaemon {
                         if (line.length > 0) {
                             try {
                                 const res = eval(line);
-                                const out = encoder.encode("###RES###" + res + String.fromCharCode(10));
+                                const out = encoder.encode("###RES###" + res + "\n");
                                 await Deno.stdout.write(out);
                             } catch(e) {
-                                const err = encoder.encode("###RES###ERROR" + String.fromCharCode(10));
+                                const err = encoder.encode("###RES###ERROR\n");
                                 await Deno.stdout.write(err);
                             }
                         }
@@ -68,8 +68,6 @@ object PersistentDenoDaemon {
         reader = process!!.inputStream.bufferedReader()
     }
 
-    private const val EVAL_TIMEOUT_MS = 5_000L
-
     @Synchronized
     fun eval(expression: String): String? {
         try {
@@ -81,36 +79,31 @@ object PersistentDenoDaemon {
             w.newLine()
             w.flush()
             
-            // Never wait forever: a stuck daemon would hold this lock (and the
-            // caller's thread) for good. Restart it on the next call instead.
-            val deadline = System.currentTimeMillis() + EVAL_TIMEOUT_MS
-            val line = StringBuilder()
-            while (System.currentTimeMillis() < deadline) {
-                if (!r.ready()) {
-                    if (process?.isAlive != true) break
-                    Thread.sleep(5)
-                    continue
-                }
-                val c = r.read()
-                if (c < 0) break
-                if (c == '\n'.code) {
-                    val text = line.toString().trimEnd('\r')
-                    line.setLength(0)
-                    if (text.startsWith("###RES###")) {
-                        val result = text.removePrefix("###RES###")
-                        return if (result == "ERROR") null else result
+            val future = java.util.concurrent.CompletableFuture.supplyAsync {
+                while (true) {
+                    val line = r.readLine() ?: return@supplyAsync null
+                    if (line.startsWith("###RES###")) {
+                        val result = line.removePrefix("###RES###")
+                        return@supplyAsync if (result == "ERROR") null else result
                     }
-                } else line.append(c.toChar())
+                }
+                null
             }
-            println("Deno daemon: no answer within ${EVAL_TIMEOUT_MS} ms, restarting")
-            process?.destroyForcibly()
-            process = null
-            currentHash = 0
-            return null
+            return try {
+                future.get(8, java.util.concurrent.TimeUnit.SECONDS)
+            } catch (te: java.util.concurrent.TimeoutException) {
+                process?.destroyForcibly()
+                process = null
+                writer = null
+                reader = null
+                null
+            }
         } catch(e: Exception) {
             println("Deno daemon error: " + e)
             process?.destroyForcibly()
             process = null
+            writer = null
+            reader = null
             return null
         }
     }
@@ -121,7 +114,13 @@ class WindowsCipherDenoEngine(
     private val sigInfo: WindowsFunctionNameExtractor.SigFunctionInfo?,
     private val nFuncInfo: WindowsFunctionNameExtractor.NFunctionInfo?
 ) {
-    private val deno: File? by lazy { com.recordlabs.desktop.data.BundledTools.find("deno") }
+    private val deno: File? by lazy { executable("deno.exe") }
+
+    private fun executable(name: String): File? {
+        val resourceDir = System.getProperty("compose.application.resources.dir")
+            ?: File(System.getProperty("user.dir"), "src/appResources/windows-x64").absolutePath
+        return File(resourceDir, name).takeIf { it.exists() }
+    }
 
     suspend fun deobfuscateSignature(signature: String): String = withContext(Dispatchers.IO) {
         val d = deno

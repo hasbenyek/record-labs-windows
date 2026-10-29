@@ -18,7 +18,9 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
 import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 
 data class WindowsAnimatedArtwork(
     val streamUrl: String,
@@ -135,6 +137,8 @@ object WindowsAnimatedArtworkRepository {
     }.getOrNull()
 
     private val appleHlsResolutionRegex = Regex("""\bRESOLUTION=(\d+)x(\d+)""", RegexOption.IGNORE_CASE)
+    private val appleHlsBandwidthRegex = Regex("""\b(?:AVERAGE-BANDWIDTH|BANDWIDTH)=(\d+)""", RegexOption.IGNORE_CASE)
+    private val appleHlsMapRegex = Regex("""#EXT-X-MAP:URI="([^"]+)"""", RegexOption.IGNORE_CASE)
 
     private fun selectCompatibleAppleAvcPlaylist(masterPlaylist: String): String? {
         val lines = masterPlaylist.lineSequence().map(String::trim).filter(String::isNotEmpty).toList()
@@ -149,43 +153,163 @@ object WindowsAnimatedArtworkRepository {
             val height = resolution.groupValues[2].toIntOrNull() ?: return@mapIndexedNotNull null
             val uri = lines.drop(index + 1).firstOrNull { !it.startsWith("#") }
                 ?: return@mapIndexedNotNull null
-            Triple(width * height, maxOf(width, height), uri)
+            val bandwidth = appleHlsBandwidthRegex.find(line)?.groupValues?.get(1)?.toIntOrNull() ?: 0
+            val longestEdge = maxOf(width, height)
+            val pixelCount = width * height
+            Triple(pixelCount, bandwidth, uri) to longestEdge
         }
-            .filter { (_, longestEdge, _) -> longestEdge <= 1440 }
-            .maxByOrNull { (pixelCount, _, _) -> pixelCount }
-            ?.third
+            .filter { (_, longestEdge) -> longestEdge <= 1440 }
+            .maxWithOrNull(compareBy({ it.first.first }, { it.first.second }))
+            ?.first?.third
     }
 
-    private fun firstAppleMp4Path(mediaPlaylist: String): String? = mediaPlaylist
-        .lineSequence()
-        .map(String::trim)
-        .firstOrNull { it.isNotEmpty() && !it.startsWith("#") && it.substringBefore('?').endsWith(".mp4") }
+    private fun firstAppleMp4Path(mediaPlaylist: String): String? {
+        val mapUri = appleHlsMapRegex.find(mediaPlaylist)?.groupValues?.get(1)?.trim()
+        if (!mapUri.isNullOrEmpty() && mapUri.substringBefore('?').endsWith(".mp4", ignoreCase = true)) {
+            return mapUri
+        }
+        return mediaPlaylist
+            .lineSequence()
+            .map(String::trim)
+            .firstOrNull { it.isNotEmpty() && !it.startsWith("#") && it.substringBefore('?').endsWith(".mp4", ignoreCase = true) }
+    }
 
-    private suspend fun resolveCompatibleAppleAvcMp4(masterUrl: String): String? = runCatching {
-        val masterPlaylist: String = client.get(masterUrl) {
-            header("User-Agent", "RecordLabs-Windows/0.1.1")
-        }.body()
-        val mediaPlaylistPath = selectCompatibleAppleAvcPlaylist(masterPlaylist) ?: return@runCatching null
-        val mediaPlaylistUrl = java.net.URI(masterUrl).resolve(mediaPlaylistPath).toString()
-        val mediaPlaylist: String = client.get(mediaPlaylistUrl) {
-            header("User-Agent", "RecordLabs-Windows/0.1.1")
-        }.body()
-        val mp4Path = firstAppleMp4Path(mediaPlaylist) ?: return@runCatching null
-        java.net.URI(mediaPlaylistUrl).resolve(mp4Path).toString()
-    }.getOrNull()
+    private val avcResolutionCache = ConcurrentHashMap<String, String>()
+    private val failedStreamUrls = Collections.synchronizedSet(LinkedHashSet<String>())
+
+    fun markFailedStreamUrl(url: String) {
+        failedStreamUrls.add(url)
+        synchronized(positiveCache) {
+            val toRemove = positiveCache.entries.filter { it.value.streamUrl == url }.map { it.key }
+            toRemove.forEach { positiveCache.remove(it) }
+        }
+    }
+
+    private suspend fun resolveCompatibleAppleAvcMp4(masterUrl: String): String? {
+        avcResolutionCache[masterUrl]?.let { return it }
+        val resolved = runCatching {
+            if (!isAllowedAppleVideoUrl(masterUrl)) return@runCatching null
+            val masterPlaylist: String = client.get(masterUrl) {
+                header("User-Agent", "RecordLabs-Windows/0.1.1")
+            }.body()
+            val mediaPlaylistPath = selectCompatibleAppleAvcPlaylist(masterPlaylist) ?: return@runCatching null
+            val mediaPlaylistUrl = java.net.URI(masterUrl).resolve(mediaPlaylistPath).toString()
+            val mediaPlaylist: String = client.get(mediaPlaylistUrl) {
+                header("User-Agent", "RecordLabs-Windows/0.1.1")
+            }.body()
+            val mp4Path = firstAppleMp4Path(mediaPlaylist) ?: return@runCatching null
+            java.net.URI(mediaPlaylistUrl).resolve(mp4Path).toString()
+        }.onFailure { e ->
+            println("resolveCompatibleAppleAvcMp4 failed for $masterUrl: ${e.message}")
+        }.getOrNull()
+
+        if (resolved != null) {
+            avcResolutionCache[masterUrl] = resolved
+        }
+        return resolved
+    }
+
+    private val isDebianBasedLinux: Boolean by lazy {
+        runCatching {
+            if (File("/etc/debian_version").isFile) return@lazy true
+            val osRelease = File("/etc/os-release").takeIf { it.isFile }?.readText() ?: ""
+            val matches = Regex("""(?m)^(?:ID|ID_LIKE)=["']?([^"'\n]+)""").findAll(osRelease)
+            val ids = matches.flatMap { it.groupValues[1].split(' ', ',', ';') }
+            ids.any {
+                it.equals("debian", ignoreCase = true) ||
+                it.equals("ubuntu", ignoreCase = true) ||
+                it.equals("pop", ignoreCase = true) ||
+                it.equals("linuxmint", ignoreCase = true) ||
+                it.equals("mint", ignoreCase = true)
+            }
+        }.getOrElse { false }
+    }
+
+    private val hasSystemHevcCodec: Boolean by lazy {
+        runCatching {
+            val libDirs = listOf(
+                "/usr/lib64",
+                "/usr/lib/x86_64-linux-gnu",
+                "/usr/lib",
+                "/usr/local/lib",
+                "/usr/lib64/vlc/plugins/codec",
+                "/usr/lib/x86_64-linux-gnu/vlc/plugins/codec",
+                "/usr/lib/vlc/plugins/codec",
+            )
+            val targets = listOf(
+                "libde265.so",
+                "libx265.so",
+                "libde265_plugin.so",
+                "libhevc_plugin.so",
+            )
+            libDirs.any { dirPath ->
+                val dir = File(dirPath)
+                if (!dir.isDirectory) return@any false
+                targets.any { prefix ->
+                    File(dir, prefix).isFile ||
+                    File(dir, "$prefix.0").isFile ||
+                    (dir.list { _, name -> name.startsWith(prefix) }?.isNotEmpty() == true)
+                }
+            }
+        }.getOrElse { false }
+    }
+
+    private val hasFfmpegHevcDecoder: Boolean by lazy {
+        runCatching {
+            val ffmpeg = sequenceOf("/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg")
+                .firstOrNull { File(it).canExecute() }
+                ?: return@lazy false
+            val process = ProcessBuilder(ffmpeg, "-decoders").redirectErrorStream(true).start()
+            val hasHevc = process.inputStream.bufferedReader().useLines { lines ->
+                lines.any { line ->
+                    line.contains("hevc", ignoreCase = true) && !line.contains("amf") && !line.contains("qsv")
+                }
+            }
+            process.waitFor()
+            hasHevc
+        }.getOrElse { false }
+    }
+
+    val supportsHevc: Boolean by lazy {
+        System.getProperty("recordlabs.hevc")?.toBooleanStrictOrNull()?.let { return@lazy it }
+        System.getenv("RECORDLABS_HEVC")?.toBooleanStrictOrNull()?.let { return@lazy it }
+        if (Platform.isWindows) return@lazy true
+        if (isDebianBasedLinux) return@lazy true
+        if (hasSystemHevcCodec) return@lazy true
+        if (hasFfmpegHevcDecoder) return@lazy true
+        false
+    }
 
     private suspend fun extractStreamUrl(response: JsonObject): String? {
         val directMp4 = sequenceOf("videoUrl", "videoUrlVertical")
             .mapNotNull { response[it]?.jsonPrimitive?.contentOrNull }
-            .firstOrNull { isAllowedAppleVideoUrl(it) && it.substringBefore('?').endsWith(".mp4") }
+            .firstOrNull { isAllowedAppleVideoUrl(it) && it.substringBefore('?').endsWith(".mp4", ignoreCase = true) && !failedStreamUrls.contains(it) }
+
+        val hlsCandidates = sequenceOf("animated", "animatedVertical", "videoUrl", "videoUrlVertical")
+            .mapNotNull { response[it]?.jsonPrimitive?.contentOrNull }
+            .filter { isAllowedAppleVideoUrl(it) && it.substringBefore('?').endsWith(".m3u8", ignoreCase = true) }
+
+        // 1. If platform supports HEVC (Windows, Debian, Pop!_OS, or Linux with full codecs like RPM Fusion / Arch),
+        // direct 4K MP4 (2160x2160) provides the maximum possible resolution with ZERO extra network latency.
+        if (supportsHevc && directMp4 != null) {
+            return directMp4
+        }
+
+        // 2. Universal H.264 (AVC) 1080x1080 MP4 resolved from HLS playlists.
+        // H.264 is universally supported across all platforms (Linux/Fedora/Debian/Arch/openSUSE and Windows)
+        // without requiring proprietary patent codecs (Fedora's stock VLC decodes AVC via openh264, but refuses HEVC).
+        for (hlsUrl in hlsCandidates) {
+            val resolvedAvc = resolveCompatibleAppleAvcMp4(hlsUrl)
+            if (resolvedAvc != null) return resolvedAvc
+        }
+
+        // 3. Fallback to direct MP4 if no AVC was resolvable
         if (directMp4 != null) return directMp4
 
-        val hlsStream = sequenceOf("animated", "animatedVertical", "videoUrl", "videoUrlVertical")
+        // 4. Fallback to any remaining allowed URL
+        return sequenceOf("animated", "animatedVertical", "videoUrl", "videoUrlVertical")
             .mapNotNull { response[it]?.jsonPrimitive?.contentOrNull }
-            .firstOrNull(::isAllowedAppleVideoUrl) ?: return null
-
-        if (hlsStream.substringBefore('?').endsWith(".mp4")) return hlsStream
-        return resolveCompatibleAppleAvcMp4(hlsStream) ?: hlsStream
+            .firstOrNull(::isAllowedAppleVideoUrl)
     }
 
     private val YOUTUBE_MEDIA_NOISE_REGEX = Regex(

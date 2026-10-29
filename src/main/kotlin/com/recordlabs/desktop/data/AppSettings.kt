@@ -67,6 +67,12 @@ object AppSettings {
     val flatQueue: Boolean get() = themeStyle.value == "flat"
     /** "pill" (round ends, as before) or "rounded" (a box with slightly rounded corners). */
     val miniPlayerShape = string("miniPlayerShape", "pill")
+    /**
+     * Lyrics typeface (lyrics page, player and floating lyrics), on every OS:
+     * "display" = SF Pro Display when installed, else the bundled Inter Display (default);
+     * "classic" = Segoe UI (Selawik on Linux without Segoe UI).
+     */
+    val lyricsFontStyle = string("lyricsFontStyle", "display") { if (it == "classic") "classic" else "display" }
     val lyricsTextSizePortrait = Setting("lyricsTextSize", WindowsPreferences.lyricsTextSize(false), { it.coerceIn(20f, 68f) }) {
         WindowsPreferences.setLyricsTextSize(false, it)
     }
@@ -238,6 +244,6 @@ object AppDataEvents {
 
 /** The app's own version (from the installer), shown in Settings > About. */
 object AppInfo {
-    private const val BUILD_VERSION = "0.1.3"
+    private const val BUILD_VERSION = "0.1.5"
     val version: String = System.getProperty("jpackage.app-version")?.takeIf(String::isNotBlank) ?: BUILD_VERSION
 }
