@@ -102,7 +102,10 @@ dependencies {
         exclude(group = "com.google.protobuf")
     }
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("net.java.dev.jna:jna-platform:5.6.0")
+    // JNA 5.6 has no Apple Silicon native code (arm64 arrived in 5.7), so Mac
+    // builds use 5.14; Windows and Linux keep the version they ship with.
+    implementation("net.java.dev.jna:jna-platform:${if (isMacHost) "5.14.0" else "5.6.0"}")
+    if (isMacHost) implementation("net.java.dev.jna:jna:5.14.0")
     implementation("io.coil-kt.coil3:coil-compose:3.3.0")
     implementation("io.coil-kt.coil3:coil-network-ktor3:3.3.0")
     implementation("org.openjfx:javafx-base:21.0.2:$javaFxClassifier")
