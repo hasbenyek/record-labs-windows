@@ -1,0 +1,73 @@
+name: macOS build (preview)
+
+# Builds Record Labs for macOS on an Apple Silicon and an Intel runner and
+# keeps each .dmg as a workflow artifact (Actions tab > this run > Artifacts).
+# It publishes no release and runs only for the macos-port branch or by hand,
+# so Windows and Linux releases and their in-app updates are untouched.
+
+on:
+  push:
+    branches: ['macos-port']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15          # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel    # Intel (GitHub's last Intel image, until fall 2027)
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Version
+        id: version
+        run: echo "version=$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Helper programs (yt-dlp, Deno)
+        run: packaging/macos/fetch-tools.sh
+
+      - name: Build the .dmg
+        env:
+          LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
+        run: ./gradlew --no-daemon packageDmg
+
+      - name: Name the .dmg by architecture
+        run: |
+          dmg="$(find build -name '*.dmg' -path '*dmg*' | head -1)"
+          test -n "$dmg"
+          mkdir -p out
+          cp "$dmg" "out/RecordLabs-${{ steps.version.outputs.version }}-${{ matrix.arch }}.dmg"
+          ls -la out
+
+      # Phase 2 still uses VLC installed on the Mac (bundling comes next), so
+      # the runner gets VLC and the packaged app plays a test tone through it.
+      - name: Audio self-test (with VLC from Homebrew)
+        continue-on-error: true
+        run: |
+          brew install --cask vlc
+          app="$(find build -maxdepth 6 -name 'Record Labs.app' -path '*binaries/main/app/*' | head -1)"
+          test -n "$app" || app="$(find build -name 'Record Labs.app' | head -1)"
+          echo "App: $app"
+          uname -m
+          "$app/Contents/MacOS/Record Labs" --self-test-audio
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-dmg
+          path: out/*.dmg
+          compression-level: 0
+          if-no-files-found: error

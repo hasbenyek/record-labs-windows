@@ -241,7 +241,8 @@ fun ensureJavaFxMediaNatives() {
     try {
         val resourceDir = System.getProperty("compose.application.resources.dir")
         val isWindows = com.recordlabs.desktop.data.Platform.isWindows
-        val platformVlcDirName = if (isWindows) "windows-x64/vlc" else "linux-x64/vlc"
+        val isMac = com.recordlabs.desktop.data.Platform.isMac
+        val platformVlcDirName = "${com.recordlabs.desktop.data.Platform.nativeResourceDirName}/vlc"
 
         val candidates = buildList {
             if (!resourceDir.isNullOrBlank()) {
@@ -267,12 +268,37 @@ fun ensureJavaFxMediaNatives() {
             if (!dir.isDirectory) return@firstOrNull false
             if (isWindows) {
                 File(dir, "libvlc.dll").isFile
+            } else if (isMac) {
+                File(dir, "libvlc.dylib").isFile || File(dir, "lib/libvlc.dylib").isFile
             } else {
                 File(dir, "libvlc.so.5").isFile || File(dir, "libvlc.so").isFile
             }
         }
 
-        if (vlcDir != null) {
+        if (vlcDir != null && isMac) {
+            // Bundled VLC on macOS: VLC.app layout (lib/ + plugins/) or flat.
+            val libDir = File(vlcDir, "lib").takeIf { File(it, "libvlc.dylib").isFile } ?: vlcDir
+            NativeLibrary.addSearchPath("libvlc", libDir.absolutePath)
+            NativeLibrary.addSearchPath("libvlccore", libDir.absolutePath)
+            val pluginsDir = File(vlcDir, "plugins").takeIf { it.isDirectory } ?: vlcDir
+            System.setProperty("VLC_PLUGIN_PATH", pluginsDir.absolutePath)
+            System.setProperty("jna.library.path", libDir.absolutePath)
+            logArtwork("VLC natives configured from: ${vlcDir.absolutePath}")
+        } else if (vlcDir == null && isMac) {
+            // No bundled copy: VLC installed in /Applications (or ~/Applications).
+            val app = listOf("/Applications/VLC.app", "${System.getProperty("user.home")}/Applications/VLC.app")
+                .map { File(it, "Contents/MacOS") }
+                .firstOrNull { File(it, "lib/libvlc.dylib").isFile }
+            if (app != null) {
+                NativeLibrary.addSearchPath("libvlc", File(app, "lib").absolutePath)
+                NativeLibrary.addSearchPath("libvlccore", File(app, "lib").absolutePath)
+                System.setProperty("jna.library.path", File(app, "lib").absolutePath)
+                if (System.getProperty("VLC_PLUGIN_PATH").isNullOrBlank()) {
+                    System.setProperty("VLC_PLUGIN_PATH", File(app, "plugins").absolutePath)
+                }
+            }
+            logArtwork("macOS VLC configured from: ${app?.absolutePath ?: "not found"}")
+        } else if (vlcDir != null) {
             NativeLibrary.addSearchPath("libvlc", vlcDir.absolutePath)
             NativeLibrary.addSearchPath("libvlccore", vlcDir.absolutePath)
             val pluginsDir = File(vlcDir, "plugins").takeIf { it.isDirectory } ?: vlcDir

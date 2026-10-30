@@ -14,14 +14,29 @@ plugins {
 val hostOs: String = System.getProperty("os.name").lowercase()
 val isWindowsHost = hostOs.startsWith("windows")
 val isLinuxHost = hostOs.contains("linux")
-val javaFxClassifier = if (isWindowsHost) "win" else if (isLinuxHost) "linux" else "mac"
-val nativeResourceDir = if (isWindowsHost) "windows-x64" else "linux-x64"
+val isMacHost = hostOs.contains("mac") || hostOs.contains("darwin")
+// macOS builds are made per architecture: Apple Silicon (arm64) and Intel (x64).
+val isAppleSiliconHost = isMacHost && System.getProperty("os.arch").lowercase().let { it == "aarch64" || it == "arm64" }
+val javaFxClassifier = if (isWindowsHost) "win" else if (isLinuxHost) "linux" else if (isAppleSiliconHost) "mac-aarch64" else "mac"
+// Folder names follow Compose's appResources convention (<os>-<arch>).
+val nativeResourceDir = when {
+    isWindowsHost -> "windows-x64"
+    isMacHost -> if (isAppleSiliconHost) "macos-arm64" else "macos-x64"
+    else -> "linux-x64"
+}
 
 group = "com.recordlabs.desktop"
 // The one place for the app version (installers, update checks). Change it with
 // "gradlew setVersion -PnewVersion=1.2.3", which also updates AppInfo.BUILD_VERSION.
 val appVersion = "0.1.7"
 version = appVersion
+// Apple requires the first number of a package version to be above 0, so a
+// Mac package of 0.x.y carries 1.x.y (shown only in Finder's Get Info); the
+// app itself still reports appVersion (AppInfo ignores it on macOS).
+val macPackageVersion: String = appVersion.split('.').let { parts ->
+    if ((parts.firstOrNull()?.toIntOrNull() ?: 0) > 0) appVersion
+    else "1." + parts.drop(1).take(2).joinToString(".").ifBlank { "0" }
+}
 
 kotlin {
     jvmToolchain(21)
@@ -141,7 +156,9 @@ compose.desktop {
         jvmArgs("-Djava.library.path=src/appResources/$nativeResourceDir")
         // Linux: dragging the borderless floating lyrics window hands the pointer
         // to the window manager, which needs AWT's X11 connection (LinuxX11Window).
-        if (!isWindowsHost) jvmArgs("--add-exports=java.desktop/sun.awt=ALL-UNNAMED", "--add-exports=java.desktop/sun.awt.X11=ALL-UNNAMED")
+        if (isLinuxHost) jvmArgs("--add-exports=java.desktop/sun.awt=ALL-UNNAMED", "--add-exports=java.desktop/sun.awt.X11=ALL-UNNAMED")
+        // macOS has no X11 classes; the window code there uses only sun.awt.
+        if (isMacHost) jvmArgs("--add-exports=java.desktop/sun.awt=ALL-UNNAMED")
         // Memory: a ceiling for the Java heap and a collector that hands unused
         // memory back to Windows (periodic GC while idle, smaller free margin).
         jvmArgs(
@@ -182,6 +199,9 @@ compose.desktop {
                     org.jetbrains.compose.desktop.application.dsl.TargetFormat.Exe,
                     org.jetbrains.compose.desktop.application.dsl.TargetFormat.Msi,
                 )
+            } else if (isMacHost) {
+                // One .dmg per architecture (built on an Apple Silicon and an Intel runner).
+                targetFormats(org.jetbrains.compose.desktop.application.dsl.TargetFormat.Dmg)
             } else {
                 // .deb (Ubuntu/Debian) and .rpm (Fedora/openSUSE). The AppImage
                 // and the Arch package are made from createDistributable by
@@ -210,6 +230,24 @@ compose.desktop {
                 rpmLicenseType = "Proprietary"
                 iconFile.set(project.file("src/main/resources/recordlabs.png"))
             }
+            macOS {
+                bundleID = "com.recordlabs.desktop"
+                packageName = "Record Labs"
+                packageVersion = macPackageVersion
+                dmgPackageVersion = macPackageVersion
+                appCategory = "public.app-category.music"
+                iconFile.set(project.file("packaging/macos/recordlabs.icns"))
+                infoPlist {
+                    // Record Labs Connect finds other devices on the same Wi-Fi; macOS
+                    // asks the user once and shows this reason.
+                    extraKeysRawXml = """
+                        <key>NSLocalNetworkUsageDescription</key>
+                        <string>Record Labs Connect finds your other Record Labs devices on the same network to hand off playback.</string>
+                        <key>LSMinimumSystemVersion</key>
+                        <string>12.0</string>
+                    """.trimIndent()
+                }
+            }
             appResourcesRootDir.set(project.layout.projectDirectory.dir("src/appResources"))
         }
         buildTypes.release.proguard {
@@ -235,6 +273,16 @@ if (isLinuxHost) {
         commandLine("bash", layout.projectDirectory.file("packaging/linux/fetch-tools.sh").asFile.absolutePath)
     }
     tasks.matching { it.name == "run" || it.name == "createDistributable" }.configureEach { dependsOn(fetchLinuxTools) }
+}
+
+// macOS: the same for the Mac builds of yt-dlp and Deno (per architecture).
+if (isMacHost) {
+    val fetchMacTools by tasks.registering(Exec::class) {
+        val toolsDir = layout.projectDirectory.dir("src/appResources/$nativeResourceDir")
+        onlyIf { !toolsDir.file("yt-dlp").asFile.exists() || !toolsDir.file("deno").asFile.exists() }
+        commandLine("bash", layout.projectDirectory.file("packaging/macos/fetch-tools.sh").asFile.absolutePath)
+    }
+    tasks.matching { it.name == "run" || it.name == "createDistributable" || it.name == "packageDmg" }.configureEach { dependsOn(fetchMacTools) }
 }
 
 // The .NET media helper, JavaFX DLLs and Windows VLC are Windows-only inputs.

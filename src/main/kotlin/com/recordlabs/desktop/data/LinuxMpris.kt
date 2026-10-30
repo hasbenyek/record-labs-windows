@@ -41,7 +41,8 @@ object LinuxMpris {
     @Volatile private var playing = false
 
     fun start() {
-        if (Platform.isWindows || connection != null) return
+        // MPRIS is the Linux desktop's media-control bus; macOS gets its own Now Playing later.
+        if (!Platform.isLinux || connection != null) return
         worker.execute {
             if (connection != null) return@execute
             runCatching {

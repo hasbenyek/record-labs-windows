@@ -245,5 +245,7 @@ object AppDataEvents {
 /** The app's own version (from the installer), shown in Settings > About. */
 object AppInfo {
     private const val BUILD_VERSION = "0.1.7"
-    val version: String = System.getProperty("jpackage.app-version")?.takeIf(String::isNotBlank) ?: BUILD_VERSION
+    // macOS packages carry a stand-in version (Apple requires its first number
+    // to be above 0, so 0.1.7 is packaged as 1.1.7); the real one is BUILD_VERSION.
+    val version: String = System.getProperty("jpackage.app-version")?.takeIf { it.isNotBlank() && !Platform.isMac } ?: BUILD_VERSION
 }

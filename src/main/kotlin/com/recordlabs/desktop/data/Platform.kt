@@ -25,6 +25,11 @@ object Platform {
 
     val isWindows: Boolean get() = os == Os.Windows
     val isLinux: Boolean get() = os == Os.Linux
+    val isMac: Boolean get() = os == Os.MacOs
+
+    /** Apple Silicon (arm64) rather than Intel, on a Mac. */
+    val isAppleSilicon: Boolean
+        get() = isMac && System.getProperty("os.arch").orEmpty().lowercase(Locale.ROOT).let { it == "aarch64" || it == "arm64" }
 
     private val home: String get() = System.getProperty("user.home").orEmpty()
 
@@ -34,7 +39,10 @@ object Platform {
      * Linux: $XDG_DATA_HOME/record-labs, normally ~/.local/share/record-labs.
      */
     val dataRoot: File by lazy {
-        if (isWindows) {
+        if (isMac) {
+            // macOS: ~/Library/Application Support/Record Labs (Apple's place for app data).
+            File("$home/Library/Application Support", "Record Labs")
+        } else if (isWindows) {
             val appData = System.getenv("LOCALAPPDATA")
                 ?: System.getenv("APPDATA")
                 ?: "$home/AppData/Local"
@@ -48,7 +56,8 @@ object Platform {
 
     /** Temporary/cache root: %LOCALAPPDATA%\RecordLabs on Windows, ~/.cache/record-labs on Linux. */
     val cacheRoot: File by lazy {
-        if (isWindows) dataRoot else {
+        if (isMac) File("$home/Library/Caches", "Record Labs")
+        else if (isWindows) dataRoot else {
             val xdg = System.getenv("XDG_CACHE_HOME")?.takeIf { it.isNotBlank() && File(it).isAbsolute }
                 ?: "$home/.cache"
             File(xdg, "record-labs")
@@ -56,18 +65,28 @@ object Platform {
     }
 
     /** Folder name for bundled native files in a development checkout (src/appResources/<name>). */
-    val nativeResourceDirName: String get() = if (isWindows) "windows-x64" else "linux-x64"
+    val nativeResourceDirName: String get() = when {
+        isWindows -> "windows-x64"
+        isMac -> if (isAppleSilicon) "macos-arm64" else "macos-x64"
+        else -> "linux-x64"
+    }
 
     /** Adds ".exe" on Windows: "deno" -> "deno.exe". */
     fun executableName(baseName: String): String = if (isWindows) "$baseName.exe" else baseName
 
     /** Name shown to other devices in Record Labs Connect. */
     val deviceName: String by lazy {
-        val name = if (isWindows) System.getenv("COMPUTERNAME") else
+        val name = if (isWindows) System.getenv("COMPUTERNAME") else if (isMac) {
+            // The name set in System Settings > General > Sharing ("Hasbi's MacBook Air").
+            runCatching {
+                val process = ProcessBuilder("scutil", "--get", "ComputerName").redirectErrorStream(true).start()
+                process.inputStream.bufferedReader().readText().trim().takeIf { process.waitFor() == 0 }
+            }.getOrNull() ?: runCatching { InetAddress.getLocalHost().hostName.removeSuffix(".local") }.getOrNull()
+        } else
             System.getenv("HOSTNAME")
                 ?: runCatching { File("/etc/hostname").readText().trim() }.getOrNull()
                 ?: runCatching { InetAddress.getLocalHost().hostName }.getOrNull()
-        name.orEmpty().ifBlank { if (isWindows) "Windows PC" else "Linux PC" }
+        name.orEmpty().ifBlank { if (isWindows) "Windows PC" else if (isMac) "Mac" else "Linux PC" }
     }
 
     /**

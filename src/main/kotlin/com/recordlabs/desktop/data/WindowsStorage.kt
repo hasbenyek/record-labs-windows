@@ -17,7 +17,8 @@ object WindowsStorage {
     } ?: "development"
 
     val directory: File by lazy {
-        val parent = File(appData, "RecordLabs").apply { mkdirs() }
+        // macOS keeps app data in ~/Library/Application Support/Record Labs.
+        val parent = (if (Platform.isMac) Platform.dataRoot else File(appData, "RecordLabs")).apply { mkdirs() }
         val target = if (File(parent, installId).exists()) {
             File(parent, installId)
         } else {
