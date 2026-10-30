@@ -977,17 +977,36 @@ class WindowsMusicRepository : CatalogRepository, LyricsRepository, AutoCloseabl
     suspend fun validateGoogleSession(): Boolean =
         withContext(Dispatchers.IO) { validateGoogleSessionOnCaller() }
 
+    /**
+     * Why the last [validateGoogleSession] said no, for login troubleshooting
+     * (request error, or the reply's top-level keys / error status; never
+     * account data). Null after a success.
+     */
+    @Volatile var lastValidationProblem: String? = null
+        private set
+
     private suspend fun validateGoogleSessionOnCaller(): Boolean {
-        if (WindowsPreferences.googleSession() == null) return false
+        if (WindowsPreferences.googleSession() == null) {
+            lastValidationProblem = "no saved session"
+            return false
+        }
         val response = runCatching {
             client.postJson(
                 "https://music.youtube.com/youtubei/v1/account/account_menu?key=$API_KEY",
                 buildJsonObject { put("context", clientContext()) }.toString(),
             )
+        }.onFailure {
+            lastValidationProblem = "request failed: ${it.javaClass.simpleName}: ${it.message.orEmpty().take(160)}"
         }.getOrNull() ?: return false
-        return response.findObjects("accountItemSectionRenderer").isNotEmpty() ||
+        val signedIn = response.findObjects("accountItemSectionRenderer").isNotEmpty() ||
             response.findObjects("activeAccountHeaderRenderer").isNotEmpty() ||
             response.findStrings("email").any { it.contains('@') }
+        lastValidationProblem = if (signedIn) null else {
+            val error = response["error"] as? JsonObject
+            val errorText = error?.let { " error=${it["code"]}/${it["status"]}" }.orEmpty()
+            "no account in reply: keys=${response.keys.take(8)}$errorText"
+        }
+        return signedIn
     }
 
     suspend fun googleAccountProfile(): GoogleAccountProfile? =

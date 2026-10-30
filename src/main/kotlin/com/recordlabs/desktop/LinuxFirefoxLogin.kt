@@ -34,6 +34,7 @@ internal object LinuxFirefoxLogin {
             .start()
         // Test pages (-Drecordlabs.loginUrl) can't be checked against YouTube Music.
         val testMode = !System.getProperty("recordlabs.loginUrl").isNullOrBlank()
+        log("login started: ${browser.name} sandbox=${browser.sandbox} default=${browser.isDefault}")
         try {
             onProgress("${browser.name} terbuka. Login dengan akun Google di sana, lalu tunggu YouTube Music tampil…")
             val started = System.currentTimeMillis()
@@ -56,6 +57,7 @@ internal object LinuxFirefoxLogin {
                     if (signedInAt == 0L) {
                         signedInAt = now
                         onProgress("Login Google terdeteksi. Menunggu YouTube Music selesai dimuat di ${browser.name}…")
+                        log("signed-in cookie seen")
                     }
                     if (cookies != lastCookies) {
                         lastCookies = cookies
@@ -73,7 +75,7 @@ internal object LinuxFirefoxLogin {
                         onProgress("Menunggu YouTube Music menerima sesi akun… Biarkan ${browser.name} terbuka sampai halaman utama YouTube Music tampil.")
                     }
                     if (now - signedInAt > GIVE_UP_AFTER_SIGN_IN_MS) {
-                        error("Login Google berhasil, tetapi YouTube Music belum menerima sesinya. Coba lagi dan tunggu sampai halaman utama YouTube Music tampil di browser.")
+                        error("Login Google berhasil, tetapi YouTube Music belum menerima sesinya. Detail untuk pengecekan: $LOG_PATH")
                     }
                 }
                 val browserOpen = process.isAlive || anyProcessUses(profile)
@@ -105,33 +107,54 @@ internal object LinuxFirefoxLogin {
 
     /**
      * Saves the browser's YouTube cookies as the Google session and asks
-     * YouTube Music whether it accepts them. A refused session is removed again.
+     * YouTube Music whether it accepts them. The page settings that go with
+     * the cookies (visitor id, account page id) are tried with and without,
+     * because a wrong page id alone makes YouTube Music refuse good cookies.
+     * A refused session is removed again.
      */
     private suspend fun saveAndCheck(cookies: List<Pair<String, String>>, testMode: Boolean, attempt: Int): Boolean {
         if (cookies.none { it.first == "SAPISID" }) return false
         val header = cookies.joinToString("; ") { "${it.first}=${it.second}" }
-        val (visitor, dataSync) = youtubeConfig(header)
-        WindowsPreferences.saveGoogleSession(header, visitor, dataSync)
-        if (testMode) return true
-        val accepted = runCatching {
-            com.recordlabs.desktop.data.WindowsMusicRepository().use { it.validateGoogleSession() }
-        }.getOrDefault(false)
-        logAttempt(attempt, cookies.map { it.first }, visitor.isNotBlank(), dataSync.isNotBlank(), accepted)
-        if (!accepted) WindowsPreferences.clearGoogleSession()
-        return accepted
+        val page = youtubeConfig(header)
+        if (testMode) {
+            WindowsPreferences.saveGoogleSession(header, page.visitor, page.dataSync)
+            return true
+        }
+        val variants = listOf(
+            "page" to Pair(page.visitor, page.dataSync),
+            "noPageId" to Pair(page.visitor, ""),
+            "bare" to Pair("", ""),
+        ).distinctBy { it.second }
+        val outcomes = mutableListOf<String>()
+        for ((name, values) in variants) {
+            WindowsPreferences.saveGoogleSession(header, values.first, values.second)
+            val (accepted, problem) = runCatching {
+                com.recordlabs.desktop.data.WindowsMusicRepository().use { repository ->
+                    repository.validateGoogleSession() to repository.lastValidationProblem
+                }
+            }.getOrElse { false to "${it.javaClass.simpleName}: ${it.message.orEmpty().take(160)}" }
+            outcomes += if (accepted) "$name=accepted" else "$name=refused($problem)"
+            if (accepted) {
+                log("attempt=$attempt ACCEPTED ${outcomes.joinToString("; ")} | ${page.summary} | cookies=${cookies.map { it.first }}")
+                return true
+            }
+        }
+        log("attempt=$attempt refused ${outcomes.joinToString("; ")} | ${page.summary} | cookies=${cookies.map { it.first }}")
+        WindowsPreferences.clearGoogleSession()
+        return false
     }
 
+    private val LOG_PATH: String get() = File(Platform.cacheRoot, "google-login.log").absolutePath
+
     /**
-     * Cookie names only (never values) and the outcome, for troubleshooting a
-     * login that doesn't finish: ~/.cache/record-labs/google-login.log.
+     * Login troubleshooting log: ~/.cache/record-labs/google-login.log (hidden
+     * folder). Cookie names and outcomes only, never cookie values.
      */
-    private fun logAttempt(attempt: Int, names: List<String>, visitor: Boolean, dataSync: Boolean, accepted: Boolean) {
+    private fun log(line: String) {
         runCatching {
-            val log = File(Platform.cacheRoot.apply { mkdirs() }, "google-login.log")
-            if (attempt == 1 && log.length() > 64 * 1024) log.delete()
-            log.appendText(
-                "${java.time.LocalDateTime.now()} firefox attempt=$attempt accepted=$accepted visitor=$visitor dataSync=$dataSync cookies=${names.sorted()}\n",
-            )
+            val file = File(Platform.cacheRoot.apply { mkdirs() }, "google-login.log")
+            if (file.length() > 128 * 1024) file.delete()
+            file.appendText("${java.time.LocalDateTime.now()} $line\n")
         }
     }
 
@@ -198,19 +221,34 @@ internal object LinuxFirefoxLogin {
         }
     }
 
-    /** VISITOR_DATA and DATASYNC_ID from YouTube Music's page config (the Chromium flow reads them from the page). */
-    private fun youtubeConfig(cookieHeader: String): Pair<String, String> = runCatching {
+    private data class PageConfig(val visitor: String, val dataSync: String, val summary: String)
+
+    /**
+     * VISITOR_DATA and DATASYNC_ID from YouTube Music's page config (the
+     * Chromium flow reads them from the open page). DATASYNC_ID is only kept
+     * when the page itself is signed in: a signed-out page carries a visitor's
+     * id there ("V…"), and sending that as the account page id makes YouTube
+     * Music refuse the session.
+     */
+    private fun youtubeConfig(cookieHeader: String): PageConfig = runCatching {
         val request = Request.Builder()
             .url("https://music.youtube.com/")
             .header("Cookie", cookieHeader)
-            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0")
+            .header("User-Agent", "Mozilla/5.0 (X11; Linux x86_64; rv:140.0) Gecko/20100101 Firefox/140.0")
+            .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             .header("Accept-Language", "en-US,en;q=0.9")
             .build()
-        val html = http.newCall(request).execute().use { it.body?.string().orEmpty() }
+        val (code, html) = http.newCall(request).execute().use { it.code to it.body?.string().orEmpty() }
+        val loggedIn = Regex("\"LOGGED_IN\"\\s*:\\s*(true|false)").find(html)?.groupValues?.get(1)
         val visitor = Regex("\"VISITOR_DATA\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1).orEmpty()
-        val dataSync = Regex("\"DATASYNC_ID\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1).orEmpty().substringBefore("||")
-        visitor to dataSync
-    }.getOrDefault("" to "")
+        val rawDataSync = Regex("\"DATASYNC_ID\"\\s*:\\s*\"([^\"]+)\"").find(html)?.groupValues?.get(1).orEmpty()
+        val dataSync = if (loggedIn == "true") rawDataSync.substringBefore("||") else ""
+        PageConfig(
+            visitor,
+            dataSync,
+            "page http=$code loggedIn=${loggedIn ?: "?"} visitor=${visitor.isNotBlank()} pageId=${if (dataSync.isNotBlank()) "account" else if (rawDataSync.isNotBlank()) "visitor-only" else "none"}",
+        )
+    }.getOrElse { PageConfig("", "", "page fetch failed: ${it.javaClass.simpleName}") }
 
     private fun anyProcessUses(profile: File): Boolean = runCatching {
         val marker = profile.absolutePath
