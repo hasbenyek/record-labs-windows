@@ -50,6 +50,18 @@ jobs:
           brew uninstall --cask vlc
           test ! -e /Applications/VLC.app
 
+      # Diagnosis: streams a real YouTube Music song through the app's own
+      # path (stream sources -> local audio proxy -> bundled VLC) on this Mac.
+      - name: Real song streaming test (diagnosis)
+        continue-on-error: true
+        env:
+          RECORDLABS_NETWORK_TESTS: '1'
+        run: |
+          ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxYouTubeStreamingTest" || true
+          for f in build/test-results/test/*LinuxYouTubeStreaming*.xml; do
+            echo "=== $f"; sed -n '1,400p' "$f"
+          done
+
       - name: Build the .dmg
         env:
           LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
