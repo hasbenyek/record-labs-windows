@@ -32,24 +32,60 @@ internal object LinuxFirefoxLogin {
             .redirectErrorStream(true)
             .redirectOutput(ProcessBuilder.Redirect.DISCARD)
             .start()
+        // Test pages (-Drecordlabs.loginUrl) can't be checked against YouTube Music.
+        val testMode = !System.getProperty("recordlabs.loginUrl").isNullOrBlank()
         try {
             onProgress("${browser.name} terbuka. Login dengan akun Google di sana, lalu tunggu YouTube Music tampil…")
             val started = System.currentTimeMillis()
             val deadline = started + 5 * 60_000L
+            // SAPISID appears in the middle of Google's sign-in redirects, before
+            // YouTube Music has loaded and before Google has set the rest of the
+            // session (__Secure-*PSIDTS, LOGIN_INFO...). Saving right then gave a
+            // session YouTube Music did not accept. So: wait until the cookies
+            // stop changing, check the session against YouTube Music while the
+            // browser is still open, and keep trying until it is accepted.
+            var signedInAt = 0L
+            var lastCookies = emptyList<Pair<String, String>>()
+            var unchangedSince = 0L
+            var lastCheckAt = 0L
+            var checks = 0
             while (System.currentTimeMillis() < deadline) {
+                val now = System.currentTimeMillis()
                 val cookies = runCatching { youtubeCookies(profile) }.getOrDefault(emptyList())
                 if (cookies.any { it.first == "SAPISID" }) {
-                    onProgress("Login berhasil. Menyiapkan sesi YouTube Music…")
-                    val header = cookies.distinctBy { it.first }.joinToString("; ") { "${it.first}=${it.second}" }
-                    val (visitor, dataSync) = youtubeConfig(header)
-                    WindowsPreferences.saveGoogleSession(header, visitor, dataSync)
-                    return@runCatching
+                    if (signedInAt == 0L) {
+                        signedInAt = now
+                        onProgress("Login Google terdeteksi. Menunggu YouTube Music selesai dimuat di ${browser.name}…")
+                    }
+                    if (cookies != lastCookies) {
+                        lastCookies = cookies
+                        unchangedSince = now
+                    }
+                    val settled = now - unchangedSince >= SETTLE_MS && now - signedInAt >= MIN_WAIT_AFTER_SIGN_IN_MS
+                    val forced = now - signedInAt >= MAX_WAIT_AFTER_SIGN_IN_MS
+                    if ((settled || forced) && now - lastCheckAt >= RECHECK_MS) {
+                        lastCheckAt = now
+                        checks++
+                        if (saveAndCheck(cookies, testMode, checks)) {
+                            onProgress("Login berhasil. Menyiapkan sesi YouTube Music…")
+                            return@runCatching
+                        }
+                        onProgress("Menunggu YouTube Music menerima sesi akun… Biarkan ${browser.name} terbuka sampai halaman utama YouTube Music tampil.")
+                    }
+                    if (now - signedInAt > GIVE_UP_AFTER_SIGN_IN_MS) {
+                        error("Login Google berhasil, tetapi YouTube Music belum menerima sesinya. Coba lagi dan tunggu sampai halaman utama YouTube Music tampil di browser.")
+                    }
                 }
                 val browserOpen = process.isAlive || anyProcessUses(profile)
-                if (!browserOpen && System.currentTimeMillis() - started > 4_000L) {
+                if (!browserOpen && now - started > 4_000L) {
+                    // Closed right after signing in: one last check with what was saved.
+                    if (signedInAt != 0L) {
+                        val finalCookies = runCatching { youtubeCookies(profile) }.getOrDefault(lastCookies)
+                        if (saveAndCheck(finalCookies, testMode, ++checks)) return@runCatching
+                    }
                     error("${browser.name} ditutup sebelum login selesai.")
                 }
-                delay(1_200L)
+                delay(1_000L)
             }
             error("Waktu login habis. Coba lagi.")
         } finally {
@@ -58,6 +94,44 @@ internal object LinuxFirefoxLogin {
             LinuxLoginBrowser.killProfileProcesses(profile)
             Thread.sleep(500)
             runCatching { profile.deleteRecursively() }
+        }
+    }
+
+    private const val SETTLE_MS = 2_500L
+    private const val MIN_WAIT_AFTER_SIGN_IN_MS = 4_000L
+    private const val MAX_WAIT_AFTER_SIGN_IN_MS = 20_000L
+    private const val RECHECK_MS = 4_000L
+    private const val GIVE_UP_AFTER_SIGN_IN_MS = 120_000L
+
+    /**
+     * Saves the browser's YouTube cookies as the Google session and asks
+     * YouTube Music whether it accepts them. A refused session is removed again.
+     */
+    private suspend fun saveAndCheck(cookies: List<Pair<String, String>>, testMode: Boolean, attempt: Int): Boolean {
+        if (cookies.none { it.first == "SAPISID" }) return false
+        val header = cookies.joinToString("; ") { "${it.first}=${it.second}" }
+        val (visitor, dataSync) = youtubeConfig(header)
+        WindowsPreferences.saveGoogleSession(header, visitor, dataSync)
+        if (testMode) return true
+        val accepted = runCatching {
+            com.recordlabs.desktop.data.WindowsMusicRepository().use { it.validateGoogleSession() }
+        }.getOrDefault(false)
+        logAttempt(attempt, cookies.map { it.first }, visitor.isNotBlank(), dataSync.isNotBlank(), accepted)
+        if (!accepted) WindowsPreferences.clearGoogleSession()
+        return accepted
+    }
+
+    /**
+     * Cookie names only (never values) and the outcome, for troubleshooting a
+     * login that doesn't finish: ~/.cache/record-labs/google-login.log.
+     */
+    private fun logAttempt(attempt: Int, names: List<String>, visitor: Boolean, dataSync: Boolean, accepted: Boolean) {
+        runCatching {
+            val log = File(Platform.cacheRoot.apply { mkdirs() }, "google-login.log")
+            if (attempt == 1 && log.length() > 64 * 1024) log.delete()
+            log.appendText(
+                "${java.time.LocalDateTime.now()} firefox attempt=$attempt accepted=$accepted visitor=$visitor dataSync=$dataSync cookies=${names.sorted()}\n",
+            )
         }
     }
 
@@ -99,15 +173,23 @@ internal object LinuxFirefoxLogin {
             Class.forName("org.sqlite.JDBC")
             DriverManager.getConnection("jdbc:sqlite:" + File(copyDir, "cookies.sqlite").absolutePath).use { connection ->
                 connection.createStatement().use { statement ->
+                    // Only first-party cookies: Firefox also keeps "partitioned" copies
+                    // (set inside other sites' frames, originAttributes ^partitionKey=…)
+                    // whose values are not the signed-in session. The site-wide
+                    // .youtube.com cookie wins over a host-only one of the same name,
+                    // then the newest.
                     statement.executeQuery(
-                        "SELECT name, value FROM moz_cookies WHERE host = 'youtube.com' OR host LIKE '%.youtube.com' ORDER BY host",
+                        "SELECT name, value FROM moz_cookies " +
+                            "WHERE (host = 'youtube.com' OR host LIKE '%.youtube.com') " +
+                            "AND originAttributes NOT LIKE '%partitionKey%' " +
+                            "ORDER BY CASE WHEN host = '.youtube.com' THEN 0 ELSE 1 END, lastAccessed DESC",
                     ).use { rows ->
                         val result = mutableListOf<Pair<String, String>>()
                         while (rows.next()) {
                             val name = rows.getString(1).orEmpty()
                             if (name.isNotBlank()) result += name to rows.getString(2).orEmpty()
                         }
-                        return result
+                        return result.distinctBy { it.first }.sortedBy { it.first }
                     }
                 }
             }
