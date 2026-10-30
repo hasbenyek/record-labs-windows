@@ -38,7 +38,7 @@ jobs:
         run: echo "version=$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)" >> "$GITHUB_OUTPUT"
 
       - name: Helper programs (yt-dlp, Deno)
-        run: packaging/macos/fetch-tools.sh
+        run: bash packaging/macos/fetch-tools.sh
 
       - name: Build the .dmg
         env:
