@@ -1,6 +1,7 @@
 Record Labs 0.1.6
 
 **Linux**
+- No more stuttering in the first seconds of a song (Fedora, Debian and other PipeWire desktops): audio now plays through PipeWire's ALSA route with a deeper buffer
 - Google login works again on Fedora: login opens in your default browser (Firefox, including the Flatpak and Snap versions, or Chrome / Chromium / Brave) and Record Labs picks up the session once you're signed in
 
 **Also in this version (from 0.1.5)**

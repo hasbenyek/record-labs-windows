@@ -77,6 +77,7 @@ internal class VlcPlayerBackend {
             // Tempo changes keep the original pitch (like the Windows helper).
             "--audio-time-stretch",
         )
+        args += audioOutputArgs()
         if (pitch != 0) {
             // Pitch moves in semitones without changing tempo.
             args += "--audio-filter=scaletempo_pitch"
@@ -101,6 +102,38 @@ internal class VlcPlayerBackend {
         if (Platform.isWindows || !System.getenv("PULSE_LATENCY_MSEC").isNullOrBlank()) return
         runCatching { uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv("PULSE_LATENCY_MSEC", "60", 0) }
     }
+
+    /**
+     * Which VLC audio output to use on Linux.
+     *
+     * Fedora, Debian and most current desktops run PipeWire. VLC's "pulse"
+     * output starts a song by scheduling it to the exact millisecond over a
+     * thin (~120 ms) buffer; when the sound card has just woken up (PipeWire
+     * suspends it after a few idle seconds) that schedule is missed, VLC then
+     * drops / resamples audio to catch up and the first seconds stutter. VLC's
+     * "alsa" output starts at once with a deep buffer and still plays through
+     * PipeWire (pipewire-alsa routes ALSA's default device into it), so it is
+     * used whenever that route is set up; "pulse" stays the fallback if ALSA
+     * can't be opened. Plain PulseAudio systems keep the pulse output.
+     * RECORDLABS_AOUT=<module> forces an output (for troubleshooting).
+     */
+    private fun audioOutputArgs(): List<String> {
+        if (Platform.isWindows) return emptyList()
+        System.getenv("RECORDLABS_AOUT")?.trim()?.takeIf(String::isNotEmpty)?.let { return listOf("--aout=$it") }
+        return if (pipeWireAlsaDefault()) listOf("--aout=alsa,pulse") else emptyList()
+    }
+
+    /** PipeWire is running and ALSA's default device goes to it (the pipewire-alsa package). */
+    private fun pipeWireAlsaDefault(): Boolean = runCatching {
+        val runtimeDir = System.getenv("XDG_RUNTIME_DIR")?.takeIf(String::isNotBlank) ?: return@runCatching false
+        val pipeWireRunning = java.io.File(runtimeDir, "pipewire-0").exists()
+        // alsa-lib reads both folders; a (symlinked) 99-pipewire-default.conf makes PipeWire the default device.
+        val alsaDefaultIsPipeWire = listOf(
+            "/etc/alsa/conf.d/99-pipewire-default.conf",
+            "/usr/share/alsa/alsa.conf.d/99-pipewire-default.conf",
+        ).any { java.io.File(it).exists() }
+        pipeWireRunning && alsaDefaultIsPipeWire
+    }.getOrDefault(false)
 
     private val events = object : MediaPlayerEventAdapter() {
         override fun playing(mediaPlayer: MediaPlayer) = update(playing = wantsToPlay, ready = true, ended = false)
