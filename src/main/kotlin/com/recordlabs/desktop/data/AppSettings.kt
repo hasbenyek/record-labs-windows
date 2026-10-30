@@ -244,6 +244,6 @@ object AppDataEvents {
 
 /** The app's own version (from the installer), shown in Settings > About. */
 object AppInfo {
-    private const val BUILD_VERSION = "0.1.5"
+    private const val BUILD_VERSION = "0.1.6"
     val version: String = System.getProperty("jpackage.app-version")?.takeIf(String::isNotBlank) ?: BUILD_VERSION
 }
