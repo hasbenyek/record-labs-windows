@@ -40,6 +40,16 @@ jobs:
       - name: Helper programs (yt-dlp, Deno)
         run: bash packaging/macos/fetch-tools.sh
 
+      # Phase 3: VLC is bundled inside the app. The arch-matching VLC.app comes
+      # from Homebrew, is copied into src/appResources, and is then removed
+      # again so the self-test below can only pass with the bundled copy.
+      - name: Bundle VLC into the app
+        run: |
+          brew install --cask vlc
+          bash packaging/macos/bundle-vlc.sh
+          brew uninstall --cask vlc
+          test ! -e /Applications/VLC.app
+
       - name: Build the .dmg
         env:
           LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
@@ -53,17 +63,15 @@ jobs:
           cp "$dmg" "out/RecordLabs-${{ steps.version.outputs.version }}-${{ matrix.arch }}.dmg"
           ls -la out
 
-      # Phase 2 still uses VLC installed on the Mac (bundling comes next), so
-      # the runner gets VLC and the packaged app plays a test tone through it.
-      - name: Audio self-test (with VLC from Homebrew)
-        continue-on-error: true
+      - name: Audio self-test (bundled VLC only, no VLC installed)
         run: |
-          brew install --cask vlc
           app="$(find build -maxdepth 6 -name 'Record Labs.app' -path '*binaries/main/app/*' | head -1)"
-          test -n "$app" || app="$(find build -name 'Record Labs.app' | head -1)"
           echo "App: $app"
           uname -m
-          "$app/Contents/MacOS/Record Labs" --self-test-audio
+          du -sh "$app"
+          out="$("$app/Contents/MacOS/Record Labs" --self-test-audio 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "SELF-TEST PASS: .*Record Labs.app" || { echo "Audio did not come from the bundled VLC"; exit 1; }
 
       - uses: actions/upload-artifact@v4
         with:
