@@ -50,6 +50,15 @@ jobs:
           brew uninstall --cask vlc
           test ! -e /Applications/VLC.app
 
+      - name: yt-dlp check (diagnosis)
+        continue-on-error: true
+        run: |
+          dir="src/appResources/$( [ "$(uname -m)" = arm64 ] && echo macos-arm64 || echo macos-x64 )"
+          "$dir/yt-dlp" --version
+          "$dir/yt-dlp" --no-config --no-playlist --socket-timeout 8 --retries 1 \
+            --js-runtimes "deno:$PWD/$dir/deno" -f "bestaudio[ext=webm]/bestaudio" --get-url \
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ" 2>&1 | cut -c1-160 | tail -15
+
       # Diagnosis: streams a real YouTube Music song through the app's own
       # path (stream sources -> local audio proxy -> bundled VLC) on this Mac.
       - name: Real song streaming test (diagnosis)
