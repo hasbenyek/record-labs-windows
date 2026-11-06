@@ -9,4 +9,4 @@ Terminal=false
 Categories=AudioVideo;Audio;Player;
 Keywords=music;youtube;lyrics;player;
 StartupNotify=true
-StartupWMClass=com-recordlabs-desktop-MainKt
+StartupWMClass=com-recordlabs-desktop-RecordLabsLauncher

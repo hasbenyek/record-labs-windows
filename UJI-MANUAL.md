@@ -2,7 +2,7 @@
 
 Centang yang lulus; kalau gagal, catat **distro + desktop (COSMIC/GNOME/KDE…), X11 atau
 Wayland, langkahnya, dan output terminal** (jalankan `record-labs` dari terminal supaya
-pesan error terlihat). Kirim catatannya ke Claude.
+pesan error terlihat). Simpan catatannya untuk perbaikan berikutnya.
 
 Cek sesi: `echo $XDG_SESSION_TYPE` (x11 / wayland) dan `echo $XDG_CURRENT_DESKTOP`.
 

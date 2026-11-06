@@ -57,7 +57,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
             echo "::error::Tag ${GITHUB_REF#refs/tags/} does not match version $v in build.gradle.kts"; exit 1
           fi
-          grep -q "BUILD_VERSION = \"$v\"" src/main/kotlin/com/recordlabs/desktop/data/AppSettings.kt \
+          grep -q "BUILD_VERSION = \"$v\"" shared/src/jvmSharedMain/kotlin/com/recordlabs/desktop/data/AppSettings.kt \
             || { echo "::error::AppInfo.BUILD_VERSION in AppSettings.kt is not $v"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
@@ -67,7 +67,7 @@ jobs:
         run: packaging/linux/build-all.sh "${{ steps.version.outputs.version }}"
 
       - name: Unit tests (audio through libVLC, Linux updater, Deno daemon)
-        run: ./gradlew --no-daemon test --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest" --tests "com.recordlabs.desktop.data.LinuxDenoCipherDaemonTest" --tests "com.recordlabs.desktop.data.LinuxFirewallTest"
+        run: ./gradlew --no-daemon :shared:jvmTest --tests "com.recordlabs.desktop.data.LinuxVlcPlaybackTest" --tests "com.recordlabs.desktop.data.AppUpdaterLinuxTest" --tests "com.recordlabs.desktop.data.LinuxDenoCipherDaemonTest" --tests "com.recordlabs.desktop.data.LinuxFirewallTest"
 
       # One download per package type (each is ~250 MB; together over 1 GB).
       - uses: actions/upload-artifact@v4
