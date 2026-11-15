@@ -1,15 +1,22 @@
 name: macOS build (testing, no release)
 
 # Builds the Mac app for Apple Silicon and Intel and keeps each .dmg as a workflow
-# artifact (Actions > this run > Artifacts). It never publishes a release and never
-# runs for main, so the Windows / Linux releases are not touched.
+# artifact (Actions > this run > Artifacts). A push only builds. Run by hand with
+# "release_tag" (for example v0.1.9), it also adds both .dmg files to that existing
+# release: the release's tag, version and Windows / Linux files stay as they are,
+# so Windows and Linux users get no update notice from it.
 on:
   push:
     branches: ['macos']
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release to add the .dmg files to (e.g. v0.1.9); empty = build only'
+        required: false
+        default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -86,3 +93,14 @@ jobs:
           app="$(find build -maxdepth 6 -name 'Record Labs.app' -path '*binaries/main/app/*' | head -1)"
           "$app/Contents/MacOS/Record Labs" --self-test-login 2>&1 | tail -20
 
+      # Only when run by hand with release_tag, and only after the checks above passed.
+      - name: Add the .dmg to the existing release
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          # The app's version must be the release's (v0.1.9 takes a 0.1.9 build).
+          test "${TAG#v}" = "${{ steps.version.outputs.version }}" || { echo "Version ${{ steps.version.outputs.version }} is not $TAG"; exit 1; }
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "out/RecordLabs-${{ steps.version.outputs.version }}-${{ matrix.arch }}.dmg"

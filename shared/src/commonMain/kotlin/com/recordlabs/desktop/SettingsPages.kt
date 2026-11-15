@@ -1208,6 +1208,7 @@ private fun AboutSettings() {
             AppPlatform.isAndroid -> "Android"
             AppPlatform.isIos -> "iPhone"
             AppPlatform.isLinux -> "Linux"
+            AppPlatform.isMac -> "Mac"
             else -> "Windows"
         }
         SettingRow("Version", "Record Labs for $platformName", icon = null, value = AppInfo.version) {}

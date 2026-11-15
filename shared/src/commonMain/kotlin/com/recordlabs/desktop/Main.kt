@@ -4530,6 +4530,7 @@ private fun androidx.compose.animation.AnimatedVisibilityScope.ConnectDevicesPag
                         AppPlatform.isAndroid -> "Android"
                         AppPlatform.isIos -> "iPhone"
                         AppPlatform.isLinux -> "Linux"
+                        AppPlatform.isMac -> "Mac"
                         else -> "Windows"
                     } + " • This device",
                     selected = remoteOwnerId == null,

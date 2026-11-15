@@ -150,6 +150,8 @@ actual object WindowsRecordLabsConnect {
     private val localOs: String get() = when {
         Platform.isAndroid -> "android"
         Platform.isLinux -> "linux"
+        // Shown as "Mac" in the other devices' lists (only the label; the protocol name stays "windows").
+        Platform.isMac -> "mac"
         else -> "windows"
     }
     /** A UDP copy larger than this is sent without the queue (the TCP copy keeps it). */

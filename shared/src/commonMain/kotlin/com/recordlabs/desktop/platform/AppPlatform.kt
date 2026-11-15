@@ -36,3 +36,6 @@ expect fun screenLongSidePixels(): Int?
 
 /** A phone (Android or iPhone): the touch layout, the portrait player and so on. */
 val AppPlatform.isPhone: Boolean get() = isAndroid || isIos
+
+/** The desktop app on a Mac (none of the other systems). Not an expect value, so the iOS build needs nothing new. */
+val AppPlatform.isMac: Boolean get() = !isWindows && !isLinux && !isAndroid && !isIos
