@@ -49,7 +49,7 @@ object WindowsNewPipeExtractor {
                 Track(
                     id = id,
                     title = item.name.orEmpty(),
-                    artist = item.uploaderName.orEmpty().ifBlank { "YouTube Music" },
+                    artist = item.uploaderName.orEmpty().ifBlank { UNKNOWN_ARTIST },
                     artworkUrl = item.thumbnailUrl,
                     durationMs = item.duration.coerceAtLeast(0L) * 1_000L,
                 ).takeIf { it.title.isNotBlank() && it.id != videoId }

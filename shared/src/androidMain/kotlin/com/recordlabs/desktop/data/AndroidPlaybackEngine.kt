@@ -67,7 +67,15 @@ class AndroidPlaybackEngine private constructor(context: Context) : PlaybackEngi
             Platform.androidAccountProfile = { AndroidYouTubeEngine.accountProfile() }
             Platform.androidValidateSession = { AndroidYouTubeEngine.validateSession() }
             Platform.androidPrefetch = { videoId -> instance().prefetch(videoId) }
+            StreamHooks.accountPost = { endpoint, fields -> AndroidYouTubeEngine.accountPost(endpoint, fields) }
+            StreamHooks.uploadPlaylistCover = { playlistId, image -> AndroidYouTubeEngine.uploadPlaylistCover(playlistId, image) }
         }
+
+        /**
+         * The app's handler of media commands ("play", "pause", "next", "previous") while
+         * its window is open, without creating the player; null when the app is closed.
+         */
+        fun commandHandler(): ((String) -> Unit)? = engine?.onMediaCommand
 
         /** The one player of the app (created on first use, on the main thread). */
         fun instance(): AndroidPlaybackEngine = engine ?: synchronized(this) {

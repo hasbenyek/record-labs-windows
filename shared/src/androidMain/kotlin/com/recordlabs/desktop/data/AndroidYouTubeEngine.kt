@@ -93,6 +93,26 @@ object AndroidYouTubeEngine {
      * answered without an account (the original app's accountInfo() then has no
      * account header), null when that could not be checked (offline, timeout).
      */
+    /** A signed-in request of the shared code (the account's playlists), see StreamHooks.accountPost. */
+    suspend fun accountPost(endpoint: String, fieldsJson: String): String {
+        syncSession()
+        return YouTube.accountPost(endpoint, fieldsJson).getOrThrow()
+    }
+
+    /** A playlist's own cover, as the original Android app uploads it; null when done, else why not. */
+    suspend fun uploadPlaylistCover(playlistId: String, image: ByteArray): String? {
+        syncSession()
+        if (YouTube.cookie.isNullOrBlank()) return "Sign in with Google to change the cover"
+        return YouTube.uploadCustomThumbnailLink(playlistId.removePrefix("VL"), image).fold(
+            onSuccess = { null },
+            onFailure = { error ->
+                System.err.println("Record Labs: playlist cover upload failed: $error")
+                (error as? io.ktor.client.plugins.ResponseException)?.response?.status?.value?.let { "YouTube answered $it" }
+                    ?: error.message ?: "the cover could not be uploaded"
+            },
+        )
+    }
+
     suspend fun validateSession(): Boolean? {
         syncSession()
         if (YouTube.cookie.isNullOrBlank()) return false
@@ -162,6 +182,8 @@ object AndroidYouTubeEngine {
             connectivityManager = connectivity,
         ).onFailure { System.err.println("Record Labs: stream for $videoId failed: ${it.message}") }
             .getOrNull() ?: return null
+        // Its loudness, for Settings > Player and audio > Normalize volume.
+        TrackLoudness.record(videoId, data.audioConfig?.loudnessDb ?: data.audioConfig?.perceptualLoudnessDb)
         urlCache[videoId] = data.streamUrl to System.currentTimeMillis() + data.streamExpiresInSeconds * 1000L
         clientOf[videoId] = data.streamClient
         return data.streamUrl

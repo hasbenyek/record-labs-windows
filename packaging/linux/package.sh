@@ -147,7 +147,12 @@ $INSTALL_DIR
 /usr/share/metainfo/$NAME.metainfo.xml
 /usr/lib/firewalld/services/record-labs-connect.xml
 EOF
-  rpmbuild --quiet --define "_topdir $top" -bb "$top/SPECS/$NAME.spec"
+  # The system's package database is used only to check build requirements (none
+  # here). On Debian/Ubuntu there is none (rpm 6: "cannot open Packages database in
+  # /var/lib/rpm"), so the build uses its own, empty one.
+  mkdir -p "$top/rpmdb"
+  rpm --initdb --dbpath "$top/rpmdb" >/dev/null 2>&1 || true
+  rpmbuild --quiet --nodeps --define "_topdir $top" --define "_dbpath $top/rpmdb" -bb "$top/SPECS/$NAME.spec"
   find "$top/RPMS" -name '*.rpm' -exec cp {} "$OUT/" \;
 }
 

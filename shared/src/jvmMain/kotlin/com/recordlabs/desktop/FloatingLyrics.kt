@@ -50,6 +50,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -279,6 +280,10 @@ fun FloatingLyricsWindow(
     }
 ) {
     val track = FloatingLyricsState.currentTrack ?: return
+    // RECORDLABS_PERF_LOG=1 only (see PerfLog); starts with the first floating lyrics.
+    if (PerfLog.enabled) LaunchedEffect(Unit) { PerfLog.start() }
+    // Linux: the minimized main window stops holding up this window (see LinuxMinimizedWindow).
+    LaunchedEffect(Unit) { LinuxMinimizedWindow.install() }
     val savedPos = remember { WindowsPreferences.floatingLyricsPosition() }
     // A size below the minimum (a window manager squeezed the window once and
     // it was saved) opened the lyrics as a thin line: start over at the default.
@@ -873,9 +878,52 @@ fun FloatingLyricsContent(
         lines.filter { !it.isBackground && it.text.isNotBlank() }
     }
 
-    val currentIndex = remember(vocalLines, positionMs) {
+    val sampleIndex = remember(vocalLines, positionMs) {
         if (vocalLines.isEmpty()) -1
         else vocalLines.indexOfLast { it.startMs <= positionMs }
+    }
+    // Linux: the next lines are timed by a clock of their own from the last position
+    // received, so each one comes in at its timestamp (positions only arrive now and then,
+    // see MainWindowActivity.LiteClock; waiting for one made the lines late and uneven).
+    var clockIndex by remember(vocalLines) { mutableStateOf(-1) }
+    if (PipLite.enabled) {
+        LaunchedEffect(vocalLines, sampleIndex, positionMs, isPlaying) {
+            clockIndex = sampleIndex
+            if (!isPlaying) return@LaunchedEffect
+            val startedAt = System.nanoTime()
+            var index = sampleIndex
+            while (true) {
+                val nextStart = vocalLines.getOrNull(index + 1)?.startMs ?: break
+                val elapsedMs = (System.nanoTime() - startedAt) / 1_000_000L
+                val waitMs = nextStart - positionMs - elapsedMs
+                if (waitMs > 0L) kotlinx.coroutines.delay(waitMs)
+                index++
+                clockIndex = index
+                if (PerfLog.enabled) {
+                    PerfLog.lineChanged((System.nanoTime() - startedAt) / 1_000_000L - (nextStart - positionMs))
+                }
+            }
+        }
+    }
+    val currentIndex = if (PipLite.enabled) maxOf(sampleIndex, clockIndex) else sampleIndex
+    if (PipLite.enabled) {
+        // Linux: the playback clock sends the position here only when the next line starts
+        // (with the main window in the background), so this window is drawn at line
+        // changes and not several times a second (see MainWindowActivity.LiteClock).
+        val nextStartMs = vocalLines.getOrNull(currentIndex + 1)?.startMs
+        val rawMs = FloatingLyricsState.positionMs
+        val shown = vocalLines.isNotEmpty()
+        SideEffect {
+            MainWindowActivity.LiteClock.floatingShown = shown
+            MainWindowActivity.LiteClock.floatingNextMs =
+                if (nextStartMs == null) Long.MAX_VALUE else rawMs + (nextStartMs - positionMs)
+        }
+        DisposableEffect(Unit) {
+            onDispose {
+                MainWindowActivity.LiteClock.floatingShown = false
+                MainWindowActivity.LiteClock.floatingNextMs = Long.MAX_VALUE
+            }
+        }
     }
 
     val interactionSource = remember { MutableInteractionSource() }
@@ -996,7 +1044,7 @@ fun FloatingLyricsContent(
                 (baseCameraY + userManualOffset).coerceIn(minCamera, maxCamera)
             } else 0f
 
-            val animatedCameraY by animateFloatAsState(
+            val cameraState = animateFloatAsState(
                 targetValue = targetCameraY,
                 animationSpec = tween(
                     durationMillis = if (isDragging) 60 else 500,
@@ -1004,6 +1052,11 @@ fun FloatingLyricsContent(
                 ),
                 label = "floating-camera-scroll",
             )
+            // Linux: the gliding camera is read only where the lines are placed, so each frame
+            // of the glide moves them without composing the window again (it was composed on
+            // every frame, on the thread that also draws the main window: the glide stuttered).
+            // Which lines are shown and which one is lit follow where the camera is going.
+            val animatedCameraY = if (PipLite.enabled) targetCameraY else cameraState.value
 
             val focusedIndex = if (!manualBrowseOverride && currentIndex in vocalLines.indices) {
                 currentIndex
@@ -1057,7 +1110,8 @@ fun FloatingLyricsContent(
                     )
                 }
             } else {
-                val maxVisibleDist = constraints.maxHeight * 1.35f
+                val maxVisibleDist = constraints.maxHeight * 1.35f +
+                    if (PipLite.enabled) (defaultLineHeight + gapPx) * 2f else 0f
                 val visibleIndices = vocalLines.indices.filter { index ->
                     val relY = (globalPositions[index] ?: 0f) - animatedCameraY
                     kotlin.math.abs(relY) <= maxVisibleDist
@@ -1087,7 +1141,10 @@ fun FloatingLyricsContent(
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .offset { IntOffset(0, relY.roundToInt()) }
+                                .offset {
+                                    val y = if (PipLite.enabled) (globalPositions[index] ?: 0f) - cameraState.value else relY
+                                    IntOffset(0, y.roundToInt())
+                                }
                                 .graphicsLayer { alpha = animatedAlpha }
                                 .onSizeChanged { itemHeights[index] = it.height }
                                 .clickable(
@@ -1101,7 +1158,16 @@ fun FloatingLyricsContent(
                                 ),
                             contentAlignment = Alignment.Center,
                         ) {
-                            NetflixSubtitleKaraokeLine(
+                            if (PipLite.enabled) {
+                                PipPlainLine(
+                                    line = vocalLines[index],
+                                    isActive = isCenterLine,
+                                    fontSize = 18.sp,
+                                    lineHeight = 25.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.fillMaxWidth(0.92f),
+                                )
+                            } else NetflixSubtitleKaraokeLine(
                                 line = vocalLines[index],
                                 isActive = isCenterLine,
                                 distFromFocus = distFromFocus,
@@ -1280,6 +1346,21 @@ fun NetflixSubtitleText(
     alpha: Float = 1.0f,
     modifier: Modifier = Modifier,
 ) {
+    if (PipLite.enabled) {
+        // Linux: one text with one soft shadow (see [PipLite]).
+        Text(
+            fontFamily = AppFonts.lyrics,
+            text = text,
+            fontSize = fontSize,
+            fontWeight = fontWeight,
+            textAlign = TextAlign.Center,
+            softWrap = true,
+            color = textColor.copy(alpha = alpha),
+            style = TextStyle(shadow = PipLite.shadow),
+            modifier = modifier,
+        )
+        return
+    }
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         // Layer 1: Extra wide ambient diffuse halo
         Text(
@@ -1352,6 +1433,58 @@ fun NetflixSubtitleText(
     }
 }
 
+/**
+ * Linux: the floating lyrics are drawn plainly. The window used to draw every line as
+ * four texts, three of them with large blurred shadows, plus the light swept word by
+ * word about 60 times a second; on Linux (a see-through X11 window, or the Wayland
+ * overlay drawn by the processor) that was heavy and the lyrics moved in jerks. Now the
+ * line being sung is white, the others grey, each with one soft shadow to stay readable
+ * over the desktop, and the window is drawn again only when the lyrics move on to the
+ * next line (and while they glide there). Windows keeps the karaoke look.
+ */
+private object PipLite {
+    val enabled: Boolean = !com.recordlabs.desktop.data.Platform.isWindows
+    /** No shadow on COSMIC's solid dark card (see PipLook). */
+    val shadow: Shadow? = if (PipLook.opaque) null else Shadow(
+        color = Color.Black.copy(alpha = 0.95f),
+        offset = Offset(0f, 1.5f),
+        blurRadius = 7f,
+    )
+}
+
+/** One line of the floating lyrics on Linux (see [PipLite]). */
+@Composable
+private fun PipPlainLine(
+    line: RichLyricLine,
+    isActive: Boolean,
+    fontSize: TextUnit,
+    lineHeight: TextUnit,
+    fontWeight: FontWeight,
+    modifier: Modifier = Modifier,
+) {
+    val plain = remember(line) {
+        if (line.words.isEmpty()) line.text
+        else buildString {
+            line.words.forEachIndexed { index, word ->
+                append(word.text)
+                if (word.trailingSpace && index < line.words.lastIndex) append(' ')
+            }
+        }
+    }
+    Text(
+        fontFamily = AppFonts.lyrics,
+        text = plain,
+        fontSize = fontSize,
+        lineHeight = lineHeight,
+        fontWeight = fontWeight,
+        textAlign = TextAlign.Center,
+        softWrap = true,
+        color = if (isActive) Color.White else Color(0xFFB4B4B4),
+        style = TextStyle(shadow = PipLite.shadow),
+        modifier = modifier,
+    )
+}
+
 @Composable
 private fun smoothPlaybackClock(
     key: Any,
@@ -1382,8 +1515,12 @@ private fun smoothPlaybackClock(
     }
     LaunchedEffect(isPlaying, animate, key) {
         if (!isPlaying || !animate) return@LaunchedEffect
-        while (true) withFrameNanos { _ ->
-            frameTick++
+        // About 60 updates a second, as the main window's lyrics: waiting for every frame
+        // had this window drawn again at the screen's rate (144 times a second on a 144 Hz
+        // screen), for no visible difference in the word fill.
+        while (true) {
+            withFrameNanos { _ -> frameTick++ }
+            kotlinx.coroutines.delay(10)
         }
     }
     @Suppress("UNUSED_EXPRESSION")

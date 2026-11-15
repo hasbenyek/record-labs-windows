@@ -39,7 +39,7 @@ actual fun AnimatedTrackArtwork(
 ) = DesktopAnimatedTrackArtwork(track, modifier, shape, enabled, musicVideoScale, onMusicVideoAspectRatio, showFullscreenButton)
 
 @Composable
-actual fun GoogleLoginView(onAuthenticated: () -> Unit) = DesktopGoogleLoginView(onAuthenticated)
+actual fun GoogleLoginView(onBack: () -> Unit, onAuthenticated: () -> Unit) = DesktopGoogleLoginView(onAuthenticated)
 
 @Composable
 actual fun appPainter(name: String): androidx.compose.ui.graphics.painter.Painter =
@@ -68,33 +68,54 @@ actual fun copyToClipboard(text: String) {
     }
 }
 
-actual fun pickMusicFolder(title: String, onPicked: (java.io.File) -> Unit) {
+actual fun pickMusicFolder(title: String, onPicked: (com.recordlabs.desktop.platform.File) -> Unit) {
     val chooser = javax.swing.JFileChooser(System.getProperty("user.home")).apply {
         dialogTitle = title
         fileSelectionMode = javax.swing.JFileChooser.DIRECTORIES_ONLY
     }
-    if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) onPicked(chooser.selectedFile)
+    if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) onPicked(com.recordlabs.desktop.platform.File.wrap(chooser.selectedFile))
 }
 
 @Composable
 actual fun PlatformBackHandler(onBack: () -> Boolean) = Unit
 
-actual fun pickBackupSaveFile(defaultName: String, onPicked: (java.io.File) -> Unit) {
-    val chooser = javax.swing.JFileChooser().apply {
-        dialogTitle = "Save Record Labs backup"
-        selectedFile = java.io.File(System.getProperty("user.home"), defaultName)
-        fileFilter = javax.swing.filechooser.FileNameExtensionFilter("Record Labs backup (*.zip)", "zip")
-    }
-    if (chooser.showSaveDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) onPicked(chooser.selectedFile)
+actual fun pickBackupSaveFile(defaultName: String, onPicked: (com.recordlabs.desktop.platform.File) -> Unit) {
+    // The system's own file window (File Explorer's on Windows), not Java's.
+    var target = nativeFileDialog(
+        title = "Save Record Labs backup",
+        mode = java.awt.FileDialog.SAVE,
+        folder = java.io.File(System.getProperty("user.home")),
+        extensions = listOf("zip"),
+        fileName = defaultName,
+    ) ?: return
+    if (!target.name.endsWith(".zip", ignoreCase = true)) target = java.io.File(target.parentFile, "${target.name}.zip")
+    onPicked(com.recordlabs.desktop.platform.File.wrap(target))
 }
 
-actual fun pickBackupOpenFile(onPicked: (java.io.File) -> Unit) {
-    val chooser = javax.swing.JFileChooser(System.getProperty("user.home")).apply {
-        dialogTitle = "Open Record Labs backup"
-        fileFilter = javax.swing.filechooser.FileNameExtensionFilter("Record Labs backup (*.zip)", "zip")
-    }
-    if (chooser.showOpenDialog(null) == javax.swing.JFileChooser.APPROVE_OPTION) onPicked(chooser.selectedFile)
+actual fun saveExportFile(defaultName: String, mimeType: String, bytes: ByteArray, onDone: (String?) -> Unit) {
+    val extension = defaultName.substringAfterLast('.', "csv")
+    val downloads = java.io.File(System.getProperty("user.home"), "Downloads").takeIf { it.isDirectory }
+    var target = nativeFileDialog(
+        title = "Export playlist",
+        mode = java.awt.FileDialog.SAVE,
+        folder = downloads ?: java.io.File(System.getProperty("user.home")),
+        extensions = listOf(extension),
+        fileName = defaultName,
+    ) ?: return onDone(null)
+    if (!target.name.endsWith(".$extension", ignoreCase = true)) target = java.io.File(target.parentFile, "${target.name}.$extension")
+    onDone(runCatching { target.writeBytes(bytes); target.absolutePath }.getOrNull())
+}
+
+actual fun pickBackupOpenFile(onPicked: (com.recordlabs.desktop.platform.File) -> Unit) {
+    nativeFileDialog(
+        title = "Open Record Labs backup",
+        mode = java.awt.FileDialog.LOAD,
+        folder = java.io.File(System.getProperty("user.home")),
+        extensions = listOf("zip"),
+    )?.let { onPicked(com.recordlabs.desktop.platform.File.wrap(it)) }
 }
 
 actual fun lyricGlowShadow(color: androidx.compose.ui.graphics.Color, desktopBlurRadius: Float): androidx.compose.ui.graphics.Shadow =
     androidx.compose.ui.graphics.Shadow(color, blurRadius = desktopBlurRadius)
+
+internal actual fun platformUiFontFamily(): androidx.compose.ui.text.font.FontFamily? = null

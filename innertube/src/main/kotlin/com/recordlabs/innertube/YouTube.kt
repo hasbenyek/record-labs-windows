@@ -2986,6 +2986,10 @@ object YouTube {
         innerTube.renamePlaylist(WEB_REMIX, playlistId, name)
     }
 
+    /** See [InnerTube.accountPost]. */
+    suspend fun accountPost(endpoint: String, fieldsJson: String): Result<String> =
+        runCatching { innerTube.accountPost(endpoint, fieldsJson) }
+
     suspend fun uploadCustomThumbnailLink(
         playlistId: String,
         image: ByteArray,

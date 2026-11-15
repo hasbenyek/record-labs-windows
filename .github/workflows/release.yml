@@ -57,7 +57,7 @@ jobs:
           if [[ "$GITHUB_REF" == refs/tags/v* && "${GITHUB_REF#refs/tags/v}" != "$v" ]]; then
             echo "::error::Tag ${GITHUB_REF#refs/tags/} does not match version $v in build.gradle.kts"; exit 1
           fi
-          grep -q "BUILD_VERSION = \"$v\"" shared/src/jvmSharedMain/kotlin/com/recordlabs/desktop/data/AppSettings.kt \
+          grep -q "BUILD_VERSION = \"$v\"" shared/src/commonMain/kotlin/com/recordlabs/desktop/data/AppSettings.kt \
             || { echo "::error::AppInfo.BUILD_VERSION in AppSettings.kt is not $v"; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
 

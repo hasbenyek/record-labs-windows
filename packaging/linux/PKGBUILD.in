@@ -8,6 +8,9 @@ arch=('x86_64')
 url="https://github.com/hasbenyek/record-labs-windows"
 license=('custom')
 depends=('alsa-lib' 'libpulse' 'libx11' 'libxext' 'libxi' 'libxrender' 'libxtst' 'libxcb' 'libglvnd' 'fontconfig' 'freetype2' 'harfbuzz' 'fribidi' 'glib2' 'dbus' 'libdrm' 'zlib' 'xdg-utils' 'ttf-font')
+# Java records through ALSA: with PipeWire or PulseAudio running, their ALSA bridge lets it
+# share the microphone (song recognition) instead of finding it busy.
+optdepends=('pipewire-alsa: microphone for song recognition with PipeWire' 'pulseaudio-alsa: microphone for song recognition with PulseAudio')
 provides=('record-labs')
 conflicts=('record-labs')
 options=('!strip' '!debug')

@@ -619,6 +619,23 @@ class InnerTube {
         }
     }
     
+    /**
+     * A signed-in YouTube Music request of Record Labs' shared code (its account's
+     * playlists), made the way this client makes its own: [endpoint] under youtubei/v1
+     * ("playlist/create", "browse/edit_playlist", "browse"...), [fieldsJson] the body
+     * without "context" (this client's goes in). Answers the response's text.
+     */
+    suspend fun accountPost(endpoint: String, fieldsJson: String): String {
+        val client = YouTubeClient.WEB_REMIX
+        val fields = Json.parseToJsonElement(fieldsJson) as kotlinx.serialization.json.JsonObject
+        val context = Json.encodeToJsonElement(Context.serializer(), client.toContext(locale, visitorData, dataSyncId))
+        val body = kotlinx.serialization.json.JsonObject(mapOf("context" to context) + fields.filterKeys { it != "context" })
+        return httpClient.post(endpoint) {
+            ytClient(client, setLogin = true)
+            setBody(io.ktor.http.content.TextContent(body.toString(), ContentType.Application.Json))
+        }.bodyAsText()
+    }
+
     suspend fun getUploadCustomThumbnailLink(
         client: YouTubeClient,
         contentLength: Int

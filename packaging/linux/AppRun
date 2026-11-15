@@ -2,4 +2,6 @@
 # AppImage entry point.
 HERE="$(dirname "$(readlink -f "$0")")"
 if [ -z "${LANG:-}${LC_ALL:-}${LC_CTYPE:-}" ]; then export LANG=C.UTF-8; fi
+# Fewer, fuller memory pools (see record-labs.sh).
+export MALLOC_ARENA_MAX="${MALLOC_ARENA_MAX:-2}"
 exec "$HERE/opt/record-labs/bin/Record Labs" "$@"

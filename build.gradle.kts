@@ -25,7 +25,7 @@ val nativeResourceDir = if (isWindowsHost) "windows-x64" else "linux-x64"
 group = "com.recordlabs.desktop"
 // The one place for the app version (installers, update checks). Change it with
 // "gradlew setVersion -PnewVersion=1.2.3", which also updates AppInfo.BUILD_VERSION.
-val appVersion = "0.1.8"
+val appVersion = "0.1.9"
 version = appVersion
 
 kotlin {
@@ -118,6 +118,14 @@ compose.desktop {
             "-XX:MaxHeapFreeRatio=30",
             "-XX:+UseStringDeduplication",
         )
+        // Linux: memory the app no longer uses outside the Java heap (pictures, VLC,
+        // the graphics) goes back to the system once a minute; glibc keeps it otherwise.
+        // (A Java without the option skips it instead of failing to start.)
+        if (!isWindowsHost) jvmArgs(
+            "-XX:+IgnoreUnrecognizedVMOptions",
+            "-XX:+UnlockExperimentalVMOptions",
+            "-XX:TrimNativeHeapInterval=60000",
+        )
 
         nativeDistributions {
             val librarySeparator = if (isWindowsHost) ";" else ":"
@@ -209,14 +217,15 @@ if (isWindowsHost) {
         .configureEach { dependsOn(copyJavaFxMediaNatives, compileNativePlayer, copyVlcNatives) }
 }
 
-val packageExeWithFirewall by tasks.registering(Exec::class) {
+// The installers are made with jpackage and our WiX template (src/installer/wix): it adds
+// the Windows Firewall rules Record Labs Connect needs (UDP 45922, TCP 45923) on install
+// and removes them on uninstall. Compose's own packageExe/packageMsi left them out, so a
+// phone could not reach the PC (the .msi had no rules at all).
+fun registerInstallerWithFirewall(taskName: String, type: String) = tasks.register(taskName, Exec::class) {
     dependsOn("createDistributable", "unzipWix")
     val appImage = layout.buildDirectory.dir("compose-$appVersion-final/binaries/main/app/Record Labs")
-    val outputTag = providers.gradleProperty("recordLabsInstallerOutputTag").orElse("latest")
-    val destination = outputTag.flatMap { tag ->
-        layout.buildDirectory.dir("compose-$appVersion-firewall-/binaries/main/exe")
-    }
-    val installer = destination.map { it.file("Record Labs-$appVersion.exe") }
+    val destination = layout.buildDirectory.dir("compose-$appVersion-firewall-/binaries/main/$type")
+    val installer = destination.map { it.file("Record Labs-$appVersion.$type") }
     val wixResources = layout.projectDirectory.dir("src/installer/wix")
     val jpackage = layout.file(
         providers.provider { File(System.getProperty("java.home"), "bin/jpackage.exe") }
@@ -232,7 +241,7 @@ val packageExeWithFirewall by tasks.registering(Exec::class) {
     }
     executable(jpackage.get().asFile.absolutePath)
     args(
-        "--type", "exe",
+        "--type", type,
         "--name", "Record Labs",
         "--app-version", appVersion,
         "--vendor", "Record Labs",
@@ -253,10 +262,17 @@ val packageExeWithFirewall by tasks.registering(Exec::class) {
     )
 }
 
+val packageExeWithFirewall = registerInstallerWithFirewall("packageExeWithFirewall", "exe")
+val packageMsiWithFirewall = registerInstallerWithFirewall("packageMsiWithFirewall", "msi")
+
 if (isWindowsHost) afterEvaluate {
     tasks.named("packageExe").configure {
         actions.clear()
         dependsOn(packageExeWithFirewall)
+    }
+    tasks.named("packageMsi").configure {
+        actions.clear()
+        dependsOn(packageMsiWithFirewall)
     }
 }
 

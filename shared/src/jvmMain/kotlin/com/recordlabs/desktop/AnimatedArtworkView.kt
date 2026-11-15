@@ -245,7 +245,12 @@ internal object ArtworkMemoryGuard {
     fun ensureStarted() {
         if (!started.compareAndSet(false, true)) return
         Thread({
-            val os = java.lang.management.ManagementFactory.getOperatingSystemMXBean() as? com.sun.management.OperatingSystemMXBean
+            // Windows only: the Linux packages leave out the module of this class (jdk.management),
+            // and reading it there stopped the guard at once (NoClassDefFoundError).
+            val windows = System.getProperty("os.name").orEmpty().startsWith("Windows")
+            val os = if (!windows) null else runCatching {
+                java.lang.management.ManagementFactory.getOperatingSystemMXBean() as? com.sun.management.OperatingSystemMXBean
+            }.getOrNull()
             val log = runCatching { File(System.getProperty("user.dir"), "record-labs-memory.log") }.getOrNull()
             runCatching { log?.writeText("") }
             var last = 0L
@@ -254,7 +259,7 @@ internal object ArtworkMemoryGuard {
                 // Windows: the process's committed (private) memory. Linux / macOS
                 // report the whole address space there, so the resident size instead.
                 val committed = runCatching {
-                    if (System.getProperty("os.name").orEmpty().startsWith("Windows")) os?.committedVirtualMemorySize ?: 0L
+                    if (windows) os?.committedVirtualMemorySize ?: 0L
                     else File("/proc/self/status").takeIf { it.exists() }?.readLines()
                         ?.firstOrNull { it.startsWith("VmRSS:") }
                         ?.filter(Char::isDigit)?.toLongOrNull()?.times(1024) ?: 0L
