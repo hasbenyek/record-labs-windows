@@ -60,8 +60,11 @@ internal fun AmbientArtworkBackground(artworkModel: Any?, baseColor: Color, modi
     // About 30 redraws a second while the main window is on screen.
     var frame by remember { mutableStateOf(0) }
     val windowShown = MainWindowActivity.isShown
-    LaunchedEffect(windowShown) {
-        if (!windowShown || !AmbientSwitch.enabled) return@LaunchedEffect
+    // macOS with lighter visuals (LightVisuals): the colours stay still (drawn again only
+    // when the song's colours change), so the page is not drawn 20 times a second.
+    val stillColours = LightVisuals.active
+    LaunchedEffect(windowShown, stillColours) {
+        if (!windowShown || !AmbientSwitch.enabled || stillColours) return@LaunchedEffect
         while (true) {
             delay(AMBIENT_FRAME_MS)
             frame++

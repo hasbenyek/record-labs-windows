@@ -988,7 +988,7 @@ internal fun RecordLabsWindow(
                     // isPlaying, duration, and loading always update immediately.
                     val newPos = nativePlayback.positionMs
                     val clock = MainWindowActivity.LiteClock
-                    val sampleJumped = AppPlatform.isLinux && clock.sample(newPos, nativePlayback.isPlaying, nanoTime())
+                    val sampleJumped = (AppPlatform.isLinux || AppPlatform.isMac) && clock.sample(newPos, nativePlayback.isPlaying, nanoTime())
                     if (MainWindowActivity.isLite) {
                         // Linux in the background: the position goes out only when it changes
                         // something on screen (see MainWindowActivity.LiteClock); the floating
@@ -3125,11 +3125,12 @@ internal fun RecordLabsWindow(
         // recomposition of the window (a new lambda written) recompose it again at the next
         // frame, for ever: the whole window drawn at the screen's rate while a song played,
         // in front or behind. The handlers below read the latest lambda when called, so they
-        // are set once. Linux only for now (Windows keeps its keys until it is tested there).
+        // are set once. Linux and macOS for now (Windows keeps its keys until it is tested there).
+        val handlersSetOnce = AppPlatform.isLinux || AppPlatform.isMac
         LaunchedEffect(
-            if (AppPlatform.isLinux) Unit else latestTogglePlayback,
-            if (AppPlatform.isLinux) Unit else latestSkipTrack,
-            if (AppPlatform.isLinux) Unit else latestSeekPlayback,
+            if (handlersSetOnce) Unit else latestTogglePlayback,
+            if (handlersSetOnce) Unit else latestSkipTrack,
+            if (handlersSetOnce) Unit else latestSeekPlayback,
         ) {
             FloatingLyricsState.onPlayPause = { latestTogglePlayback() }
             FloatingLyricsState.onPrevious = { latestSkipTrack(-1) }
@@ -9765,8 +9766,8 @@ private fun LyricsAtPosition(
             }
         }
     }
-    if (AppPlatform.isLinux) {
-        // Linux in the background: tells the playback clock when these lyrics next change
+    if (AppPlatform.isLinux || AppPlatform.isMac) {
+        // Linux and macOS in the background: tells the playback clock when these lyrics next change
         // (a line starts or ends), so the position is sent then and not several times a
         // second (see MainWindowActivity.LiteClock).
         val boundaries = remember(lyricGroups) {
@@ -13200,11 +13201,13 @@ private fun smoothPlaybackClock(
         // The desktop also asks for no more frames than that: waiting for every frame
         // (even without using it) had the whole window drawn again at the screen's own
         // rate, 144 times a second on a 144 Hz laptop, the blurred lines and all.
-        val desktop = AppPlatform.isWindows || AppPlatform.isLinux
+        val desktop = AppPlatform.isWindows || AppPlatform.isLinux || AppPlatform.isMac
+        // macOS with lighter visuals (LightVisuals): the sung line moves 30 times a second.
         var lastTick = 0L
         while (true) {
+            val minTickNanos = if (LightVisuals.active) 32_000_000L else 15_000_000L
             withFrameNanos { frameNanos ->
-                if (frameNanos - lastTick >= 15_000_000L) {
+                if (frameNanos - lastTick >= minTickNanos) {
                     lastTick = frameNanos
                     frameTick++
                 }
@@ -13245,6 +13248,7 @@ private fun TimedLyricText(
     // no magnified letters, no glow and no depth blur; the lit line is simply white, as
     // lyrics without word timing. Back as before once the window is used again.
     val lite = MainWindowActivity.isLite
+    val lighterVisuals = LightVisuals.active
     val wordTimed = line.words.isNotEmpty() && !lite
     val transitionEasing = androidx.compose.animation.core.CubicBezierEasing(0.16f, 1f, 0.3f, 1f)
     // In the background (lite) the changes are short and start together: fewer frames.
@@ -13370,7 +13374,8 @@ private fun TimedLyricText(
             // floating letters, whose glow reaches past it), but left out where it shows
             // nothing: a line faded out completely was still blurred on every frame.
             .graphicsLayer {
-                val blurPx = if (LyricDepthBlur.enabled && !lite && renderedAlpha > 0.004f) depthBlur.dp.toPx() else 0f
+                // (macOS with lighter visuals: no depth blur, see LightVisuals.)
+                val blurPx = if (LyricDepthBlur.enabled && !lite && !lighterVisuals && renderedAlpha > 0.004f) depthBlur.dp.toPx() else 0f
                 renderEffect = if (blurPx > 0f) {
                     androidx.compose.ui.graphics.BlurEffect(
                         blurPx,

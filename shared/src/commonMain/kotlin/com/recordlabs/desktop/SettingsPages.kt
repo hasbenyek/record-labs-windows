@@ -560,13 +560,26 @@ internal fun AppearanceSettings() {
             animatedArtwork = it
             if (it) WindowsAnimatedArtworkRepository.clearAllMisses()
         }
-        if (AppPlatform.isWindows || AppPlatform.isLinux) {
+        if (AppPlatform.isWindows || AppPlatform.isLinux || AppPlatform.isMac) {
             var pauseInBackground by AppSettings.pauseVisualsInBackground
             SettingToggle(
                 "Pause visuals in the background",
                 "While you use another window (Record Labs on a second screen, say), the music video, animated artwork and the moving background colours pause to save the graphics card. The music and lyrics keep going; everything moves again when you click back into Record Labs.",
                 pauseInBackground,
             ) { pauseInBackground = it }
+        }
+        // macOS: lighter visuals for slower Macs (see LightVisuals); on by itself on those.
+        if (AppPlatform.isMac) {
+            var lighterVisuals by AppSettings.macLighterVisuals
+            SettingToggle(
+                "Lighter visuals",
+                if (LightVisuals.isSlowerMac) {
+                    "Turned on by itself on this Mac. The background colours stay still, the other lyric lines are not softly blurred and the sung line moves 30 times a second, so the app runs smoother."
+                } else {
+                    "The background colours stay still, the other lyric lines are not softly blurred and the sung line moves 30 times a second. For slower Macs."
+                },
+                LightVisuals.active,
+            ) { lighterVisuals = if (it) "on" else "off" }
         }
     }
     SettingsGroup("Style") {

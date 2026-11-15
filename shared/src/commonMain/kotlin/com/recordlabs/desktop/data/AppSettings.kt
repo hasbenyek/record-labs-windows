@@ -77,6 +77,8 @@ object AppSettings {
      * and lyrics go on. On by default (much less work for the graphics card).
      */
     val pauseVisualsInBackground = bool("pauseVisualsInBackground", true)
+    /** macOS only: "auto" (on for slower Macs), "on" or "off". See LightVisuals. */
+    val macLighterVisuals = string("macLighterVisuals", "auto") { if (it == "on" || it == "off") it else "auto" }
     /** Icons and highlights in the neutral colour. */
     val flatTheme: Boolean get() = themeStyle.value == "flat"
     val flatMiniPlayer: Boolean get() = themeStyle.value == "flat" || themeStyle.value == "flatMini"

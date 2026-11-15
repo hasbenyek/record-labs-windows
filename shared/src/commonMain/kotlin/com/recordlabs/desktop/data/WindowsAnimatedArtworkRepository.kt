@@ -343,7 +343,8 @@ object WindowsAnimatedArtworkRepository {
 
     /** Linux: the lighter clips (see extractStreamUrl); RECORDLABS_ARTWORK4K=1 keeps the 4K clip. */
     private val preferLighterClipOnLinux: Boolean by lazy {
-        AppPlatform.isLinux && systemEnv("RECORDLABS_ARTWORK4K") != "1"
+        // macOS too: the 1080 H.264 clip instead of the 2160 one (shown at 1080 at most).
+        (AppPlatform.isLinux || AppPlatform.isMac) && systemEnv("RECORDLABS_ARTWORK4K") != "1"
     }
     /** Linux that plays HEVC: its 1080 HEVC rendition may stand in for a stale H.264 clip. */
     private val lighterHevcOnLinux: Boolean get() = preferLighterClipOnLinux && supportsHevc

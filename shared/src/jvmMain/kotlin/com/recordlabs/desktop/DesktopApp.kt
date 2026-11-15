@@ -538,7 +538,11 @@ fun runDesktopApp(args: Array<String>) {
             val fullscreenController = remember(window) { DesktopFullscreenController(window) }
             // macOS: the profile page in the menu bar, and a dark window behind the content.
             if (MacDesktop.isActive) MacProfileMenuBar()
-            LaunchedEffect(window) { MacDesktop.prepareWindow(window) }
+            LaunchedEffect(window) {
+                MacDesktop.prepareWindow(window)
+                // macOS test builds: the performance log from the start (not only with the floating lyrics).
+                if (MacDesktop.isActive && PerfLog.enabled) PerfLog.start()
+            }
             val currentToggleFullscreen by rememberUpdatedState(toggleFullscreen)
             val currentlyFullscreen by rememberUpdatedState(isFullscreen)
 

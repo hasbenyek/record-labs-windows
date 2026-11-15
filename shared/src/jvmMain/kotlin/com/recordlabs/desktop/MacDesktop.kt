@@ -44,6 +44,12 @@ internal object MacDesktop {
         // The Mac package carries a stand-in version (Apple requires a first number
         // above 0, so 0.1.9 is packaged as 1.1.9); AppInfo then uses the real one.
         System.clearProperty("jpackage.app-version")
+        // An Intel Mac with 4 processor threads or fewer (MacBook Air 2018–2020, say) gets
+        // lighter visuals by default (LightVisuals; the user can turn them on or off).
+        if (System.getProperty("recordlabs.slowerMac").isNullOrBlank()) {
+            val slower = !Platform.isAppleSilicon && Runtime.getRuntime().availableProcessors() <= 4
+            System.setProperty("recordlabs.slowerMac", slower.toString())
+        }
     }
 
     /** The window's own background (seen for a moment before Compose draws): dark like the app. */

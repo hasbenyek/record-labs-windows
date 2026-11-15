@@ -133,6 +133,8 @@ compose.desktop {
             "-Dapple.awt.application.appearance=system",
             "-Dapple.laf.useScreenMenuBar=true",
         )
+        // Mac test builds (macos.yml on a push): performance log in ~/Music/record-labs-perf.txt.
+        if (isMacHost && (project.findProperty("recordlabs.perfLog") as String?) == "true") jvmArgs("-Drecordlabs.perfLog=true")
         // Memory: a ceiling for the Java heap and a collector that hands unused
         // memory back to Windows (periodic GC while idle, smaller free margin).
         jvmArgs(

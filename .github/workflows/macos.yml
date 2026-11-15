@@ -55,7 +55,11 @@ jobs:
       - name: Build the .dmg
         env:
           LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
-        run: ./gradlew --no-daemon packageDmg
+        # Test builds (a push, or a run without release_tag) keep a performance log in
+        # ~/Music/record-labs-perf.txt; the build that goes into a release does not.
+        run: |
+          if [ -z "${{ inputs.release_tag }}" ]; then perf="-Precordlabs.perfLog=true"; else perf=""; fi
+          ./gradlew --no-daemon packageDmg $perf
 
       - name: Name the .dmg by architecture
         run: |

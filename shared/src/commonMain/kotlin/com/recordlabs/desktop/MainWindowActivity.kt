@@ -151,7 +151,8 @@ internal object MainWindowActivity {
     }
 
     private fun apply() {
-        val lite = AppPlatform.isLinux && (!active || (hiddenIsBackground && (!visible || floatingShowing)))
+        // Linux and macOS: lighter drawing while the window is in the background.
+        val lite = (AppPlatform.isLinux || AppPlatform.isMac) && (!active || (hiddenIsBackground && (!visible || floatingShowing)))
         if (isLite != lite) isLite = lite
         val run = visible && active
         if (shownNow == run && isShown == run) return

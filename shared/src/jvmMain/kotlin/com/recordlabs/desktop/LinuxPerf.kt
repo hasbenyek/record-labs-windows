@@ -14,7 +14,10 @@ package com.recordlabs.desktop
  */
 internal object PerfLog {
     private val env = System.getenv("RECORDLABS_PERF_LOG")
-    private val toFile: Boolean = env != "0" && env != "1" && MainWindowActivity.isRedHatFamily
+    /** macOS test builds (-Drecordlabs.perfLog=true, see macos.yml): written to ~/Music too. */
+    private val macTestBuild: Boolean =
+        com.recordlabs.desktop.data.Platform.isMac && System.getProperty("recordlabs.perfLog") == "true"
+    private val toFile: Boolean = env != "0" && env != "1" && (MainWindowActivity.isRedHatFamily || macTestBuild)
     val enabled: Boolean = env == "1" || toFile
 
     private class Counter {
@@ -46,11 +49,17 @@ internal object PerfLog {
             }.getOrNull()
         }
         Thread({
-            val shell = runCatching {
-                ProcessBuilder("gnome-shell", "--version").redirectErrorStream(true).start()
+            val isMac = com.recordlabs.desktop.data.Platform.isMac
+            fun run(vararg command: String) = runCatching {
+                ProcessBuilder(*command).redirectErrorStream(true).start()
                     .inputStream.bufferedReader().readText().trim()
-            }.getOrDefault("?")
-            val osName = runCatching {
+            }.getOrNull()
+            // macOS: the processor and the Mac model instead of the Linux desktop shell.
+            val shell = if (isMac) {
+                "${run("sysctl", "-n", "machdep.cpu.brand_string")} model=${run("sysctl", "-n", "hw.model")} " +
+                    "threads=${Runtime.getRuntime().availableProcessors()} lighterVisuals=${LightVisuals.active}"
+            } else run("gnome-shell", "--version") ?: "?"
+            val osName = if (isMac) "macOS ${run("sw_vers", "-productVersion")}" else runCatching {
                 java.io.File("/etc/os-release").readLines().firstOrNull { it.startsWith("PRETTY_NAME=") }
                     ?.substringAfter('=')?.trim('"')
             }.getOrNull()
