@@ -118,6 +118,8 @@ object AppUpdater {
                 if (compareVersions(target, AppInfo.version) > 0 && code != null && code != 0 && code != 3010) {
                     lastInstallProblem.value = if (code == 1602 || code == 1223) {
                         "The update to $target was cancelled."
+                    } else if (Platform.isMac && code == 2) {
+                        "The update to $target couldn't replace Record Labs in its folder. Drag Record Labs from the window that opened into Applications."
                     } else "The update to $target didn't finish (code $code). Try again from here."
                 }
                 resultFile.delete()
@@ -253,6 +255,8 @@ object AppUpdater {
 
     fun currentPackageType(): String {
         System.getProperty("recordlabs.packageType")?.takeIf(String::isNotBlank)?.let { return it.lowercase() }
+        // macOS: a .dmg per architecture (see macDmgFor).
+        if (Platform.isMac) return "dmg"
         if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) return "msi"
         if (System.getenv("APPIMAGE") != null) return "appimage"
         if (File("/etc/debian_version").isFile) return "deb"
@@ -301,6 +305,7 @@ object AppUpdater {
                 "deb" -> assets.firstOrNull { nameOf(it).endsWith(".deb", ignoreCase = true) }
                 "rpm" -> assets.firstOrNull { nameOf(it).endsWith(".rpm", ignoreCase = true) }
                 "appimage" -> assets.firstOrNull { nameOf(it).endsWith(".appimage", ignoreCase = true) }
+                "dmg" -> macDmgFor(assets.map { it to nameOf(it) })
                 else -> assets.firstOrNull { nameOf(it).endsWith(".msi", ignoreCase = true) }
                     ?: assets.firstOrNull { nameOf(it).endsWith(".exe", ignoreCase = true) }
             } ?: continue
@@ -322,6 +327,19 @@ object AppUpdater {
             )
         }
         return null
+    }
+
+    /**
+     * macOS: the release's .dmg for this Mac (…-arm64.dmg on Apple Silicon, …-x64.dmg on
+     * Intel). A release without one is skipped, so a Windows/Linux-only release changes nothing.
+     */
+    private fun <T> macDmgFor(assets: List<Pair<T, String>>): T? {
+        val dmgs = assets.filter { it.second.endsWith(".dmg", ignoreCase = true) }
+        val words = if (Platform.isAppleSilicon) listOf("arm64", "aarch64", "apple-silicon") else listOf("x64", "x86_64", "intel")
+        return dmgs.firstOrNull { (_, name) ->
+            val base = name.lowercase().removeSuffix(".dmg")
+            words.any { base.endsWith("-$it") || base.endsWith("_$it") }
+        }?.first
     }
 
     /** An installer downloaded earlier (for example before a restart) that still checks out. */
@@ -356,6 +374,14 @@ object AppUpdater {
             return System.getProperty("jpackage.app-path")?.let(::File)
                 ?.takeIf { it.isFile && it.name.endsWith(".exe", ignoreCase = true) }
         }
+        if (Platform.isMac) {
+            // …/Record Labs.app/Contents/MacOS/Record Labs. A copy macOS runs from a temporary
+            // read-only place (App Translocation, or straight from the .dmg) can't be replaced.
+            val launcher = System.getProperty("jpackage.app-path")?.let(::File)?.takeIf { it.isFile && it.canExecute() } ?: return null
+            val path = launcher.absolutePath
+            if ("/AppTranslocation/" in path || path.startsWith("/Volumes/")) return null
+            return launcher.takeIf { macAppBundle(it) != null }
+        }
         System.getenv("APPIMAGE")?.let(::File)?.takeIf { it.isFile && it.canExecute() }?.let { return it }
         return System.getProperty("jpackage.app-path")?.let(::File)
             ?.takeIf { it.isFile && it.canExecute() }
@@ -369,7 +395,9 @@ object AppUpdater {
     internal var scriptOnly = false
 
     private fun launchInstaller(ready: State.Ready, exe: File, relaunch: Boolean): Boolean {
-        return if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) {
+        return if (Platform.isMac) {
+            launchMacInstaller(ready, exe, relaunch)
+        } else if (System.getProperty("os.name").orEmpty().startsWith("Windows", ignoreCase = true)) {
             launchWindowsInstaller(ready, exe, relaunch)
         } else {
             launchLinuxInstaller(ready, exe, relaunch)
@@ -460,11 +488,72 @@ object AppUpdater {
         }.getOrDefault(false)
     }
 
+    /** The Record Labs.app folder [launcher] belongs to (…/X.app/Contents/MacOS/X). */
+    private fun macAppBundle(launcher: File): File? =
+        launcher.absoluteFile.parentFile?.parentFile?.parentFile?.takeIf { it.name.endsWith(".app") && it.isDirectory }
+
+    /**
+     * macOS: once Record Labs has quit, opens the downloaded .dmg, puts its Record Labs.app
+     * in place of the running one (same folder, normally Applications), and opens it again
+     * after "Restart to update". When the folder can't be written (another user's install)
+     * the .dmg is opened instead, to drag the app into Applications by hand.
+     * Result codes: 0 done, 2 the app folder couldn't be replaced, 3 copy failed, 4 the .dmg didn't open.
+     */
+    private fun launchMacInstaller(ready: State.Ready, exe: File, relaunch: Boolean): Boolean {
+        val app = (if (scriptOnly) File("/Applications/Record Labs.app") else macAppBundle(exe)) ?: return false
+        fun q(value: String) = "'" + value.replace("'", "'\\''") + "'"
+        val folder = app.absoluteFile.parentFile.absolutePath
+        val staged = "$folder/.Record Labs.update.app"
+        val old = "$folder/.Record Labs.old.app"
+        val script = buildString {
+            appendLine("#!/bin/sh")
+            appendLine("pid=${ProcessHandle.current().pid()}")
+            appendLine("while kill -0 \"\$pid\" 2>/dev/null; do sleep 0.2; done")
+            appendLine("dmg=${q(ready.file.absolutePath)}")
+            appendLine("app=${q(app.absolutePath)}")
+            appendLine("staged=${q(staged)}")
+            appendLine("old=${q(old)}")
+            appendLine("mnt=\$(mktemp -d /tmp/recordlabs-update.XXXXXX)")
+            appendLine("code=4")
+            appendLine("if hdiutil attach -nobrowse -noautoopen -readonly -mountpoint \"\$mnt\" \"\$dmg\" >/dev/null 2>&1; then")
+            appendLine("  src=\$(find \"\$mnt\" -maxdepth 1 -name '*.app' | head -n 1)")
+            appendLine("  code=3")
+            appendLine("  rm -rf \"\$staged\"")
+            appendLine("  if [ -n \"\$src\" ] && ditto \"\$src\" \"\$staged\" 2>/dev/null; then")
+            appendLine("    xattr -dr com.apple.quarantine \"\$staged\" 2>/dev/null")
+            appendLine("    rm -rf \"\$old\"")
+            appendLine("    if mv \"\$app\" \"\$old\" 2>/dev/null; then")
+            appendLine("      if mv \"\$staged\" \"\$app\"; then code=0; rm -rf \"\$old\"; else mv \"\$old\" \"\$app\"; code=2; fi")
+            appendLine("    else")
+            appendLine("      code=2")
+            appendLine("    fi")
+            appendLine("  fi")
+            appendLine("  rm -rf \"\$staged\"")
+            appendLine("  hdiutil detach \"\$mnt\" -quiet 2>/dev/null || hdiutil detach \"\$mnt\" -force -quiet 2>/dev/null")
+            appendLine("fi")
+            appendLine("rmdir \"\$mnt\" 2>/dev/null")
+            appendLine("echo ${q(ready.release.version)} \$code > ${q(resultFile.absolutePath)}")
+            appendLine("if [ \$code -ne 0 ]; then open \"\$dmg\"; fi")
+            if (relaunch) appendLine("if [ \$code -eq 0 ]; then open \"\$app\"; fi")
+        }
+        val scriptFile = File(updatesDir, "install-update.sh")
+        scriptFile.writeText(script)
+        scriptFile.setExecutable(true)
+        if (scriptOnly) return true
+        return runCatching {
+            ProcessBuilder("/bin/sh", scriptFile.absolutePath)
+                .redirectErrorStream(true)
+                .redirectOutput(nullOutput())
+                .start()
+            true
+        }.getOrDefault(false)
+    }
+
     /** Starts [commandLine] with no console window, independent of this process. */
     private fun launchWithoutWindow(commandLine: String): Boolean = launchWindowsProcessWithoutWindow(commandLine)
 
     private fun versionOfFile(name: String): String? =
-        Regex("""^RecordLabs-([0-9][0-9A-Za-z.\-]*?)\.(msi|exe|deb|rpm|appimage)(\.part|\.sha256)?$""", RegexOption.IGNORE_CASE)
+        Regex("""^RecordLabs-([0-9][0-9A-Za-z.\-]*?)\.(msi|exe|deb|rpm|appimage|dmg)(\.part|\.sha256)?$""", RegexOption.IGNORE_CASE)
             .find(name)?.groupValues?.get(1)
 
     private fun parseVersion(version: String): List<Int> =

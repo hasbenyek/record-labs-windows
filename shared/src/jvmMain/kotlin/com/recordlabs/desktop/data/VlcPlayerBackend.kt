@@ -68,6 +68,7 @@ internal class VlcPlayerBackend {
     }
 
     private fun createPlayer(pitch: Int) {
+        useMacPlugins()
         useSteadyAudioOutput()
         val args = mutableListOf(
             "--intf=dummy", "--no-video", "--no-osd", "--no-stats", "--quiet",
@@ -98,6 +99,16 @@ internal class VlcPlayerBackend {
      * unnoticeable) avoids that. Read by the sound library when a stream opens;
      * a value the user already set is kept.
      */
+    /**
+     * macOS: libVLC reads its plugin folder from the environment; the bundled VLC's folder
+     * (found by ensureJavaFxMediaNatives) is handed to it before the first player is made.
+     */
+    private fun useMacPlugins() {
+        if (!Platform.isMac || !System.getenv("VLC_PLUGIN_PATH").isNullOrBlank()) return
+        val plugins = System.getProperty("VLC_PLUGIN_PATH")?.takeIf(String::isNotBlank) ?: return
+        runCatching { uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv("VLC_PLUGIN_PATH", plugins, 0) }
+    }
+
     private fun useSteadyAudioOutput() {
         if (Platform.isWindows || !System.getenv("PULSE_LATENCY_MSEC").isNullOrBlank()) return
         runCatching { uk.co.caprica.vlcj.binding.lib.LibC.INSTANCE.setenv("PULSE_LATENCY_MSEC", "60", 0) }

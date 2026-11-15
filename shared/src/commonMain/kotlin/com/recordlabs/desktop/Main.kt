@@ -2389,6 +2389,28 @@ internal fun RecordLabsWindow(
             if (navigationHistory.lastOrNull() != snapshot) navigationHistory += snapshot
             forwardNavigationHistory.clear()
         }
+        // macOS menu bar: open a profile page or sign out (see ProfileMenuBridge; never set elsewhere).
+        val profileMenuRequest = ProfileMenuBridge.pending
+        LaunchedEffect(profileMenuRequest) {
+            val request = profileMenuRequest ?: return@LaunchedEffect
+            ProfileMenuBridge.pending = null
+            when (request) {
+                is ProfileMenuBridge.Request.Open -> {
+                    val page = ProfilePage.entries.firstOrNull { it.name == request.page } ?: return@LaunchedEffect
+                    pushNavigation()
+                    playerDestination = null
+                    catalogDestination = null
+                    profilePage = page
+                    settingsSubpage = if (page == ProfilePage.Settings) request.settingsSubpage else null
+                    if (page == ProfilePage.ListenTogether) ListenTogetherUi.settingsOpen = false
+                }
+                ProfileMenuBridge.Request.Logout -> {
+                    WindowsPreferences.signOutGoogle()
+                    accountSyncGeneration++
+                    ProfileMenuBridge.accountVersion++
+                }
+            }
+        }
         fun restoreNavigation(snapshot: NavigationSnapshot) {
             section = snapshot.section
             profilePage = snapshot.profilePage
@@ -5954,9 +5976,11 @@ private fun ProfileHomePage(
     onOpenPage: (ProfilePage) -> Unit,
     onGoogleSessionChanged: () -> Unit,
 ) {
-    var moreContent by remember { mutableStateOf(WindowsPreferences.moreContent()) }
-    var autoSync by remember { mutableStateOf(WindowsPreferences.autoSync()) }
-    var signedIn by remember { mutableStateOf(WindowsPreferences.googleSession() != null) }
+    // Read again when the macOS menu bar changed one of them (ProfileMenuBridge).
+    val menuAccountVersion = ProfileMenuBridge.accountVersion
+    var moreContent by remember(menuAccountVersion) { mutableStateOf(WindowsPreferences.moreContent()) }
+    var autoSync by remember(menuAccountVersion) { mutableStateOf(WindowsPreferences.autoSync()) }
+    var signedIn by remember(menuAccountVersion) { mutableStateOf(WindowsPreferences.googleSession() != null) }
     var accountName by remember { mutableStateOf(WindowsPreferences.googleAccountName()) }
     var accountPhoto by remember { mutableStateOf(WindowsPreferences.googleAccountPhoto()) }
     LaunchedEffect(signedIn) {

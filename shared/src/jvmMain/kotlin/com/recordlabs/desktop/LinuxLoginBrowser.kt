@@ -42,10 +42,14 @@ internal object LinuxLoginBrowser {
     private val chromiumWords = listOf("chrome", "chromium", "brave", "edge", "vivaldi", "opera", "thorium")
     private val firefoxWords = listOf("firefox", "librewolf", "waterfox", "floorp", "zen-browser", "zen_browser", "mullvad-browser")
 
-    fun find(): Browser? = (listOfNotNull(defaultBrowser()) + installedBrowsers()).firstOrNull()
+    fun find(): Browser? =
+        if (Platform.isMac) MacLoginBrowsers.all().firstOrNull()
+        else (listOfNotNull(defaultBrowser()) + installedBrowsers()).firstOrNull()
 
     /** Every browser login could use, default first (for diagnostics). */
-    fun all(): List<Browser> = (listOfNotNull(defaultBrowser()) + installedBrowsers()).distinctBy { it.command }
+    fun all(): List<Browser> =
+        if (Platform.isMac) MacLoginBrowsers.all()
+        else (listOfNotNull(defaultBrowser()) + installedBrowsers()).distinctBy { it.command }
 
     // ---- default browser -----------------------------------------------------
 

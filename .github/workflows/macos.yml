@@ -1,0 +1,88 @@
+name: macOS build (testing, no release)
+
+# Builds the Mac app for Apple Silicon and Intel and keeps each .dmg as a workflow
+# artifact (Actions > this run > Artifacts). It never publishes a release and never
+# runs for main, so the Windows / Linux releases are not touched.
+on:
+  push:
+    branches: ['macos']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15          # Apple Silicon
+            arch: arm64
+          - runner: macos-15-intel    # Intel
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Version
+        id: version
+        run: echo "version=$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)" >> "$GITHUB_OUTPUT"
+
+      - name: Helper programs (yt-dlp, Deno)
+        run: bash packaging/macos/fetch-tools.sh
+
+      - name: Bundle VLC into the app
+        run: |
+          brew install --cask vlc
+          bash packaging/macos/bundle-vlc.sh
+          brew uninstall --cask vlc
+          test ! -e /Applications/VLC.app
+
+      - name: Build the .dmg
+        env:
+          LISTEN_TOGETHER_KEY: ${{ secrets.LISTEN_TOGETHER_KEY }}
+        run: ./gradlew --no-daemon packageDmg
+
+      - name: Name the .dmg by architecture
+        run: |
+          dmg="$(find build -name '*.dmg' -path '*binaries*' | head -1)"
+          test -n "$dmg"
+          mkdir -p out
+          cp "$dmg" "out/RecordLabs-${{ steps.version.outputs.version }}-${{ matrix.arch }}.dmg"
+          (cd out && shasum -a 256 *.dmg | tee "SHA256-${{ matrix.arch }}.txt")
+          ls -la out
+
+      # Kept before the checks below, so a failing check still leaves the .dmg to try.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-dmg
+          path: |
+            out/*.dmg
+            out/SHA256-*.txt
+          compression-level: 0
+          if-no-files-found: error
+
+      - name: Audio self-test (bundled VLC only, no VLC installed)
+        run: |
+          app="$(find build -maxdepth 6 -name 'Record Labs.app' -path '*binaries/main/app/*' | head -1)"
+          echo "App: $app"
+          uname -m
+          du -sh "$app"
+          codesign -dv "$app" 2>&1 | head -5 || true
+          out="$("$app/Contents/MacOS/Record Labs" --self-test-audio 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q "SELF-TEST PASS: .*Record Labs.app" || { echo "Audio did not come from the bundled VLC"; exit 1; }
+
+      - name: Login browser check (diagnosis)
+        continue-on-error: true
+        run: |
+          app="$(find build -maxdepth 6 -name 'Record Labs.app' -path '*binaries/main/app/*' | head -1)"
+          "$app/Contents/MacOS/Record Labs" --self-test-login 2>&1 | tail -20
+

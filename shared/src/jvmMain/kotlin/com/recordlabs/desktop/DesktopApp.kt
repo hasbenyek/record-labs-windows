@@ -330,6 +330,12 @@ internal class DesktopFullscreenController(
 
     fun setFullscreen(enabled: Boolean) = onAwtThread {
         if (enabled == active) return@onAwtThread
+        if (com.recordlabs.desktop.data.Platform.isMac) {
+            // macOS: the system's own full screen (its own Space, green button behaviour).
+            MacDesktop.setFullscreen(frame, enabled)
+            active = enabled
+            return@onAwtThread
+        }
         if (!DesktopUiScale.isWindows()) {
             val handled = runCatching { LinuxX11Window.requestFullscreen(frame, enabled) }.getOrDefault(false)
             if (!handled) {
@@ -416,6 +422,8 @@ internal class DesktopFullscreenController(
 
 /** The desktop app (Windows and Linux); the desktop project's main() calls this. */
 fun runDesktopApp(args: Array<String>) {
+    // macOS only: light/dark title bar, the menu bar at the top of the screen (see MacDesktop).
+    MacDesktop.configureBeforeAwt()
     // Set Java2D's Linux scale before Compose or AWT initializes its display toolkit.
     DesktopUiScale.configureBeforeAwt()
     if (args.contains("--self-test-display")) {
@@ -500,6 +508,10 @@ fun runDesktopApp(args: Array<String>) {
             kotlin.system.exitProcess(0)
         }
         androidx.compose.runtime.SideEffect { com.recordlabs.desktop.data.AppUpdater.exitApp = closeRecordLabs }
+        // macOS: Record Labs > About / Settings… / Quit (Quit closes like the window's close button).
+        LaunchedEffect(Unit) {
+            MacDesktop.installAppMenuHandlers { com.recordlabs.desktop.data.AppUpdater.exitApp?.invoke() }
+        }
         LaunchedEffect(Unit) {
             // Looks for a new release shortly after start, then every 6 hours.
             withContext(Dispatchers.IO) { com.recordlabs.desktop.data.AppUpdater.cleanUp() }
@@ -524,6 +536,9 @@ fun runDesktopApp(args: Array<String>) {
             alwaysOnTop = false,
         ) {
             val fullscreenController = remember(window) { DesktopFullscreenController(window) }
+            // macOS: the profile page in the menu bar, and a dark window behind the content.
+            if (MacDesktop.isActive) MacProfileMenuBar()
+            LaunchedEffect(window) { MacDesktop.prepareWindow(window) }
             val currentToggleFullscreen by rememberUpdatedState(toggleFullscreen)
             val currentlyFullscreen by rememberUpdatedState(isFullscreen)
 

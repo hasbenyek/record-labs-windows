@@ -169,9 +169,12 @@ internal object BrowserGoogleLogin {
 
     suspend fun login(onProgress: (String) -> Unit): Result<Unit> {
         if (!com.recordlabs.desktop.data.Platform.isWindows) {
-            // Linux: the user's default browser first (Firefox included), like Windows.
+            // Linux and macOS: the user's default browser first (Firefox included), like Windows.
             val browser = LinuxLoginBrowser.find()
-                ?: return Result.failure(IllegalStateException("Tidak ada browser yang bisa dipakai untuk login. Pasang Firefox, Chrome, Chromium atau Brave."))
+                ?: return Result.failure(IllegalStateException(
+                    if (com.recordlabs.desktop.data.Platform.isMac) "Tidak ada browser yang bisa dipakai untuk login (Safari tidak bisa). Pasang Chrome, Brave, Edge atau Firefox."
+                    else "Tidak ada browser yang bisa dipakai untuk login. Pasang Firefox, Chrome, Chromium atau Brave.",
+                ))
             onProgress("Membuka ${browser.name}…")
             return if (browser.engine == LinuxLoginBrowser.Engine.Firefox) {
                 LinuxFirefoxLogin.login(browser, startUrl, onProgress)
@@ -502,6 +505,8 @@ private fun focusRecordLabsWindow() {
         frame.extendedState = frame.extendedState and Frame.ICONIFIED.inv()
     }
     frame.isVisible = true
+    // macOS: bring the whole app forward (the browser stays the active app otherwise).
+    if (com.recordlabs.desktop.data.Platform.isMac) runCatching { java.awt.Desktop.getDesktop().requestForeground(true) }
     frame.toFront()
     frame.requestFocus()
 }

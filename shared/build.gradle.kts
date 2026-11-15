@@ -26,7 +26,9 @@ val iosEnabled = providers.gradleProperty("recordlabs.ios").orNull == "true"
 val hostOs: String = System.getProperty("os.name").lowercase()
 val isWindowsHost = hostOs.startsWith("windows")
 val isLinuxHost = hostOs.contains("linux")
-val javaFxClassifier = if (isWindowsHost) "win" else if (isLinuxHost) "linux" else "mac"
+val isMacHost = hostOs.contains("mac") || hostOs.contains("darwin")
+val isAppleSiliconHost = isMacHost && System.getProperty("os.arch").lowercase().let { it == "aarch64" || it == "arm64" }
+val javaFxClassifier = if (isWindowsHost) "win" else if (isLinuxHost) "linux" else if (isAppleSiliconHost) "mac-aarch64" else "mac"
 
 // Listen Together: official builds prove themselves to the Record Labs server with a
 // key that is never committed. Put LISTEN_TOGETHER_KEY=<key> in local.properties
@@ -148,7 +150,9 @@ kotlin {
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation("uk.co.caprica:vlcj:4.8.3")
-            implementation("net.java.dev.jna:jna-platform:5.6.0")
+            // Mac builds: JNA 5.14 (5.6 has no Apple Silicon code); Windows and Linux unchanged.
+            implementation("net.java.dev.jna:jna-platform:${if (isMacHost) "5.14.0" else "5.6.0"}")
+            if (isMacHost) implementation("net.java.dev.jna:jna:5.14.0")
             implementation("org.openjfx:javafx-base:21.0.2:$javaFxClassifier")
             implementation("org.openjfx:javafx-graphics:21.0.2:$javaFxClassifier")
             implementation("org.openjfx:javafx-controls:21.0.2:$javaFxClassifier")
