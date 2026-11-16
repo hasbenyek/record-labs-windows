@@ -19,7 +19,33 @@ permissions:
   contents: write
 
 jobs:
+  # Run by hand with release_tag: makes sure the release exists. A new one is made as a
+  # draft (notes from packaging/macos/release-notes.md) and published by "publish" below
+  # once both .dmg files are in it; an existing release (v0.1.9, say) only gets the files.
+  prepare:
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Release (draft when new)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          v="$(sed -n 's/^val appVersion = "\(.*\)"/\1/p' build.gradle.kts | tr -d '\r' | head -1)"
+          test "${TAG#v}" = "$v" || { echo "::error::Version $v is not $TAG"; exit 1; }
+          grep -q "BUILD_VERSION = \"$v\"" shared/src/commonMain/kotlin/com/recordlabs/desktop/data/AppSettings.kt \
+            || { echo "::error::AppInfo.BUILD_VERSION is not $v"; exit 1; }
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --draft --target "$GITHUB_SHA" \
+              --title "Record Labs $v (Mac)" --notes-file packaging/macos/release-notes.md
+          fi
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease
+
   build:
+    needs: prepare
+    # Also runs on a push (prepare is then skipped).
+    if: ${{ !failure() && !cancelled() }}
     strategy:
       fail-fast: false
       matrix:
@@ -108,3 +134,24 @@ jobs:
           test "${TAG#v}" = "${{ steps.version.outputs.version }}" || { echo "Version ${{ steps.version.outputs.version }} is not $TAG"; exit 1; }
           gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease
           gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "out/RecordLabs-${{ steps.version.outputs.version }}-${{ matrix.arch }}.dmg"
+
+  # Publishes a release this workflow made as a draft, once both .dmg files are in it.
+  # Not marked "Latest", so the release page keeps pointing at the Windows / Linux one.
+  publish:
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          assets="$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets --jq '[.assets[].name] | join(" ")')"
+          echo "Files: $assets"
+          case "$assets" in *-arm64.dmg*) ;; *) echo "::error::No arm64 .dmg"; exit 1;; esac
+          case "$assets" in *-x64.dmg*) ;; *) echo "::error::No x64 .dmg"; exit 1;; esac
+          if [ "$(gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)" = "true" ]; then
+            gh release edit "$TAG" -R "$GITHUB_REPOSITORY" --draft=false --latest=false
+          fi
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease,url
