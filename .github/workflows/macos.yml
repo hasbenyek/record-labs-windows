@@ -117,6 +117,13 @@ jobs:
           echo "$out"
           echo "$out" | grep -q "SELF-TEST PASS: .*Record Labs.app" || { echo "Audio did not come from the bundled VLC"; exit 1; }
 
+      - name: Media controls self-test (earphone remote / media keys)
+        run: |
+          app="$(find build -maxdepth 6 -name 'Record Labs.app' -path '*binaries/main/app/*' | head -1)"
+          out="$("$app/Contents/MacOS/Record Labs" --self-test-media 2>&1)" || { echo "$out"; exit 1; }
+          echo "$out" | grep "MEDIA-TEST"
+          echo "$out" | grep -q "MEDIA-TEST PASS"
+
       - name: Login browser check (diagnosis)
         continue-on-error: true
         run: |

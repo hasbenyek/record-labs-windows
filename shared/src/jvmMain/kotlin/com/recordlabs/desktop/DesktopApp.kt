@@ -433,6 +433,7 @@ fun runDesktopApp(args: Array<String>) {
     // Packaging check: play a tone through the real audio path, no window.
     if ("--self-test-audio" in args) kotlin.system.exitProcess(runAudioSelfTest())
     if ("--self-test-login" in args) kotlin.system.exitProcess(runLoginSelfTest())
+    if ("--self-test-media" in args) kotlin.system.exitProcess(com.recordlabs.desktop.data.MacNowPlaying.selfTest())
     if ("--self-test-connect" in args) kotlin.system.exitProcess(runConnectSelfTest())
     // Load JavaFX media natives before the off-screen video decoder starts.
     ensureJavaFxMediaNatives()

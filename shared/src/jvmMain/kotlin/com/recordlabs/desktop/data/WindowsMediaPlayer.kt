@@ -90,6 +90,8 @@ class WindowsMediaPlayer : PlaybackEngine {
             }
         }
         commandExecutor.execute { ensureStarted() }
+        // macOS: earphone remote / media keys / Control Center (see MacNowPlaying).
+        if (Platform.isMac) MacNowPlaying.start { command -> onMediaCommand?.invoke(command) }
     }
 
     private fun ensureStarted(): Boolean = synchronized(lifecycleLock) {
@@ -446,6 +448,7 @@ class WindowsMediaPlayer : PlaybackEngine {
         // "Ready" matters: while a new source is still opening the position is
         // frozen at 0, and the video must not run ahead of silent audio.
         MusicVideoClock.publish(currentTrack?.id, isPlaying && isReady, positionMs, playbackTempo, durationMs)
+        if (Platform.isMac) MacNowPlaying.update(currentTrack, isPlaying, positionMs, durationMs)
         _state.value = WindowsPlaybackSnapshot(
             trackId = currentTrack?.id,
             isPlaying = isPlaying,
