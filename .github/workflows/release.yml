@@ -13,7 +13,9 @@ name: Release (Windows + Linux)
 
 on:
   push:
-    tags: ['v*']
+    # The macos branch has no tag trigger: its tags (v0.2.0, ...) are Mac-only releases
+    # made by macos.yml, so they must not build or publish Windows / Linux installers.
+    # (main keeps tags: ['v*'] as before.)
     # main: a push with a version that has no release yet publishes it (and
     # creates its tag v1.2.3), so raising the version and pushing is enough.
     # linux-port: build and test only.

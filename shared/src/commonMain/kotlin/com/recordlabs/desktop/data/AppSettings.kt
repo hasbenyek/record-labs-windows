@@ -278,7 +278,7 @@ object AppDataEvents {
 
 /** The app's own version (from the installer), shown in Settings > About. */
 object AppInfo {
-    private const val BUILD_VERSION = "0.1.9"
+    private const val BUILD_VERSION = "0.2.0"
     val version: String = systemProperty("jpackage.app-version")?.takeIf(String::isNotBlank) ?: systemProperty("recordlabs.app-version")?.takeIf(String::isNotBlank) ?: BUILD_VERSION
 }
 

@@ -33,7 +33,7 @@ val nativeResourceDir = when {
 group = "com.recordlabs.desktop"
 // The one place for the app version (installers, update checks). Change it with
 // "gradlew setVersion -PnewVersion=1.2.3", which also updates AppInfo.BUILD_VERSION.
-val appVersion = "0.1.9"
+val appVersion = "0.2.0"
 version = appVersion
 // Apple requires the first number of a package version to be above 0, so a
 // Mac package of 0.x.y carries 1.x.y (shown only in Finder's Get Info); the
